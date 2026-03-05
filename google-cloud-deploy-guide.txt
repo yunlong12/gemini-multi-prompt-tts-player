@@ -1,0 +1,374 @@
+Gemini TTS App 新架构部署到 Google Cloud（Cloud Run + Firestore + Cloud Scheduler）
+
+本版本对应当前代码库的“手动生成 + 定时计划任务”架构：
+- 前端仍部署在 Cloud Run 上，提供手机可访问的管理界面
+- 后端在同一个 Cloud Run 服务中提供 API
+- 计划配置和执行记录存 Firestore
+- 音频和 JSON 结果存 Cloud Storage
+- Cloud Scheduler 固定轮询后端内部端点，触发到期任务
+
+========================================================================
+0. 部署前先做的事
+========================================================================
+
+1. 立刻轮换你当前的 Gemini API Key
+- 你在聊天和本地上下文里已经暴露过旧 key
+- 不要继续使用当前这个 key
+- 先去 Google AI Studio 生成新 key，再继续后续步骤
+
+2. 准备好以下值
+- PROJECT_ID：你的 GCP 项目 ID，不是项目名称
+- REGION：建议 `us-central1`
+- SERVICE_NAME：建议 `gemini-multi-prompt-tts-player`
+- BUCKET_NAME：例如 `gemini-tts-daily-briefings-001`
+- APP_ADMIN_PASSWORD：用于手机端登录后台
+- SCHEDULER_SHARED_SECRET：用于 Cloud Scheduler 调内部接口
+
+========================================================================
+1. 登录并选择 GCP 项目
+========================================================================
+
+登录：
+gcloud auth login
+
+列出项目：
+gcloud projects list
+
+设置当前项目（必须用 PROJECT_ID）：
+gcloud config set project YOUR_PROJECT_ID
+
+验证：
+gcloud config get-value project
+
+========================================================================
+2. 启用必须的 API
+========================================================================
+
+gcloud services enable ^
+  run.googleapis.com ^
+  cloudbuild.googleapis.com ^
+  artifactregistry.googleapis.com ^
+  secretmanager.googleapis.com ^
+  cloudscheduler.googleapis.com ^
+  firestore.googleapis.com ^
+  storage.googleapis.com
+
+说明：
+- `run.googleapis.com`：Cloud Run
+- `cloudbuild.googleapis.com`：源码部署 Cloud Run
+- `artifactregistry.googleapis.com`：构建镜像存储
+- `secretmanager.googleapis.com`：存放密钥
+- `cloudscheduler.googleapis.com`：定时触发
+- `firestore.googleapis.com`：计划和运行记录
+- `storage.googleapis.com`：音频文件和 JSON 文件
+
+========================================================================
+3. 初始化 Firestore
+========================================================================
+
+首次使用时，需要初始化 Firestore（Native mode）：
+
+1. 打开控制台：
+https://console.cloud.google.com/firestore
+
+2. 选择：
+- Native mode
+- 区域建议和 Cloud Run 同区域或相近区域
+
+说明：
+- 当前代码默认使用以下集合：
+  - `schedules`
+  - `schedule_runs`
+- 不需要提前手动建集合，应用运行时会自动写入
+
+========================================================================
+4. 创建 Cloud Storage Bucket
+========================================================================
+
+创建 bucket（名称必须全局唯一）：
+gcloud storage buckets create gs://YOUR_BUCKET_NAME --location=US-CENTRAL1
+
+建议：
+- bucket 保持私有，不要公开
+- 该应用会把文件存成类似：
+  - `daily-briefings/<scheduleId>/<yyyy>/<mm>/<dd>/<runId>.wav`
+  - `daily-briefings/<scheduleId>/<yyyy>/<mm>/<dd>/<runId>.json`
+
+========================================================================
+5. 把密钥放入 Secret Manager
+========================================================================
+
+创建或更新 3 个 Secret：
+
+1. Gemini API Key
+"YOUR_NEW_GEMINI_API_KEY" | gcloud secrets create GEMINI_API_KEY --data-file=-
+
+如果已经存在：
+"YOUR_NEW_GEMINI_API_KEY" | gcloud secrets versions add GEMINI_API_KEY --data-file=-
+
+2. 管理后台密码
+"YOUR_ADMIN_PASSWORD" | gcloud secrets create APP_ADMIN_PASSWORD --data-file=-
+
+如果已经存在：
+"YOUR_ADMIN_PASSWORD" | gcloud secrets versions add APP_ADMIN_PASSWORD --data-file=-
+
+3. Scheduler 内部调用密钥
+"YOUR_SCHEDULER_SECRET" | gcloud secrets create SCHEDULER_SHARED_SECRET --data-file=-
+
+如果已经存在：
+"YOUR_SCHEDULER_SECRET" | gcloud secrets versions add SCHEDULER_SHARED_SECRET --data-file=-
+
+========================================================================
+6. 创建 Cloud Run 服务账号
+========================================================================
+
+创建服务账号：
+gcloud iam service-accounts create gemini-tts-sa --display-name "Gemini TTS Service Account"
+
+服务账号邮箱格式：
+gemini-tts-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com
+
+========================================================================
+7. 授权 Cloud Run 服务账号
+========================================================================
+
+1. 允许读取 Secret
+gcloud secrets add-iam-policy-binding GEMINI_API_KEY ^
+  --member="serviceAccount:gemini-tts-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" ^
+  --role="roles/secretmanager.secretAccessor"
+
+gcloud secrets add-iam-policy-binding APP_ADMIN_PASSWORD ^
+  --member="serviceAccount:gemini-tts-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" ^
+  --role="roles/secretmanager.secretAccessor"
+
+gcloud secrets add-iam-policy-binding SCHEDULER_SHARED_SECRET ^
+  --member="serviceAccount:gemini-tts-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" ^
+  --role="roles/secretmanager.secretAccessor"
+
+2. 允许写 Cloud Storage
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID ^
+  --member="serviceAccount:gemini-tts-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" ^
+  --role="roles/storage.objectAdmin"
+
+3. 允许访问 Firestore
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID ^
+  --member="serviceAccount:gemini-tts-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" ^
+  --role="roles/datastore.user"
+
+说明：
+- `roles/datastore.user` 可满足 Firestore 读写
+- `roles/storage.objectAdmin` 允许写入音频和 JSON
+
+========================================================================
+8. 部署到 Cloud Run
+========================================================================
+
+当前仓库已支持通过源码直接部署：
+
+gcloud run deploy gemini-multi-prompt-tts-player ^
+  --source . ^
+  --region us-central1 ^
+  --allow-unauthenticated ^
+  --service-account gemini-tts-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com ^
+  --set-secrets GEMINI_API_KEY=GEMINI_API_KEY:latest ^
+  --set-secrets APP_ADMIN_PASSWORD=APP_ADMIN_PASSWORD:latest ^
+  --set-secrets SCHEDULER_SHARED_SECRET=SCHEDULER_SHARED_SECRET:latest ^
+  --set-env-vars GCS_BUCKET_NAME=YOUR_BUCKET_NAME ^
+  --set-env-vars APP_DEFAULT_TIMEZONE=Europe/Paris ^
+  --set-env-vars FIRESTORE_COLLECTION_SCHEDULES=schedules ^
+  --set-env-vars FIRESTORE_COLLECTION_RUNS=schedule_runs ^
+  --set-env-vars PORT=8080 ^
+  --port 8080
+
+说明：
+- Cloud Run 会调用 `npm run build` 生成前端，再用 `npm start` 启动服务
+- 如果首次部署提示创建 Artifact Registry 仓库，输入 `y`
+
+部署完成后会输出一个 Service URL，例如：
+https://gemini-multi-prompt-tts-player-xxxx-uc.a.run.app
+
+========================================================================
+9. 验证 Cloud Run 服务
+========================================================================
+
+检查服务：
+gcloud run services describe gemini-multi-prompt-tts-player --region us-central1
+
+读取日志：
+gcloud run services logs read gemini-multi-prompt-tts-player --region us-central1
+
+健康检查：
+打开：
+https://YOUR_CLOUD_RUN_URL/api/health
+
+预期返回：
+{"ok":true}
+
+========================================================================
+10. 创建 Cloud Scheduler 定时任务
+========================================================================
+
+当前代码的内部轮询端点是：
+POST /api/internal/run-due-schedules
+
+该端点必须带 header：
+X-Internal-Key: YOUR_SCHEDULER_SECRET
+
+建议每 5 分钟轮询一次：
+- Cron: `*/5 * * * *`
+- 时区: `Europe/Paris`
+
+创建命令：
+gcloud scheduler jobs create http schedule-runner ^
+  --location=us-central1 ^
+  --schedule="*/5 * * * *" ^
+  --time-zone="Europe/Paris" ^
+  --uri="https://YOUR_CLOUD_RUN_URL/api/internal/run-due-schedules" ^
+  --http-method=POST ^
+  --headers="X-Internal-Key=YOUR_SCHEDULER_SECRET,Content-Type=application/json" ^
+  --message-body="{}"
+
+说明：
+- 这里把 `SCHEDULER_SHARED_SECRET` 的值直接放到 header
+- 这是首版最直接的做法
+- 若后续需要更高安全性，可改成 Cloud Scheduler 使用 OIDC + Cloud Run 私有调用
+
+立即手动触发一次 Scheduler Job：
+gcloud scheduler jobs run schedule-runner --location=us-central1
+
+查看 Scheduler Job：
+gcloud scheduler jobs describe schedule-runner --location=us-central1
+
+========================================================================
+11. 首次使用（手机端）
+========================================================================
+
+1. 打开 Cloud Run URL
+2. 进入 `Schedules` 页面
+3. 使用 `APP_ADMIN_PASSWORD` 登录
+4. 创建一个计划，例如：
+- Name: Daily News Briefing
+- Prompt Template:
+  请搜索 {{yesterday}} 在法国和国际范围内最重要的新闻，筛选 5-8 条，按适合晨间播报的口吻总结，每条 2-3 句，最后给出一句整体趋势判断。
+- Frequency: daily
+- Time: 08:00
+- Timezone: Europe/Paris
+- TTS Model: gemini-2.5-pro-preview-tts
+- Output Prefix: daily-briefings
+
+5. 点击保存
+6. 点击 `Run` 先手动执行一次
+7. 到 `Runs` 页面检查：
+- 是否生成了文本
+- 是否可下载音频
+- 是否看到了来源链接
+
+如果手动执行成功，Cloud Scheduler 后续就会按计划自动执行。
+
+========================================================================
+12. 常用运维命令
+========================================================================
+
+1. 查看 Cloud Run 日志
+gcloud run services logs read gemini-multi-prompt-tts-player --region us-central1
+
+2. 查看 Scheduler 最近执行
+gcloud scheduler jobs describe schedule-runner --location=us-central1
+
+3. 列出 bucket 里的结果文件
+gcloud storage ls -r gs://YOUR_BUCKET_NAME
+
+4. 更新 Cloud Run 环境变量
+gcloud run services update gemini-multi-prompt-tts-player ^
+  --region us-central1 ^
+  --update-env-vars APP_DEFAULT_TIMEZONE=Europe/Paris
+
+5. 更新 Secret（例如轮换管理员密码）
+"YOUR_NEW_ADMIN_PASSWORD" | gcloud secrets versions add APP_ADMIN_PASSWORD --data-file=-
+
+6. 重新部署最新代码
+gcloud run deploy gemini-multi-prompt-tts-player ^
+  --source . ^
+  --region us-central1 ^
+  --allow-unauthenticated ^
+  --service-account gemini-tts-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com ^
+  --set-secrets GEMINI_API_KEY=GEMINI_API_KEY:latest ^
+  --set-secrets APP_ADMIN_PASSWORD=APP_ADMIN_PASSWORD:latest ^
+  --set-secrets SCHEDULER_SHARED_SECRET=SCHEDULER_SHARED_SECRET:latest ^
+  --set-env-vars GCS_BUCKET_NAME=YOUR_BUCKET_NAME ^
+  --set-env-vars APP_DEFAULT_TIMEZONE=Europe/Paris ^
+  --set-env-vars FIRESTORE_COLLECTION_SCHEDULES=schedules ^
+  --set-env-vars FIRESTORE_COLLECTION_RUNS=schedule_runs ^
+  --set-env-vars PORT=8080 ^
+  --port 8080
+
+========================================================================
+13. 本地开发与云上行为差异
+========================================================================
+
+本地开发时（默认）：
+- 若没有 GCP 凭据，代码不会强制要求 Firestore/GCS
+- 计划和运行记录会回退到：
+  - `server/data/runtime-db.json`
+- 生成的音频和 JSON 会回退到：
+  - `server/data/results/...`
+
+云上部署时：
+- 检测到 GCP 项目环境后，自动使用 Firestore
+- 若设置了 `GCS_BUCKET_NAME`，自动把结果写入 Cloud Storage
+
+这意味着：
+- 你可以先本地把功能跑通
+- 再把同一套代码直接部署到 Cloud Run
+
+========================================================================
+14. 常见错误与处理
+========================================================================
+
+1. `project must be set to a valid project ID`
+- 原因：用了项目名称，不是 PROJECT_ID
+- 处理：`gcloud projects list` 后重新 `gcloud config set project`
+
+2. `Invalid service account (...@<PROJECT_ID>...)`
+- 原因：命令里保留了占位符
+- 处理：把 `YOUR_PROJECT_ID` 替换成真实项目 ID
+
+3. Cloud Run 启动后返回 500，提示缺少环境变量
+- 原因：没配置：
+  - `GEMINI_API_KEY`
+  - `APP_ADMIN_PASSWORD`
+  - `SCHEDULER_SHARED_SECRET`
+- 处理：检查 `--set-secrets` 是否完整
+
+4. 手动执行计划时报 Firestore 权限错误
+- 原因：服务账号没有 `roles/datastore.user`
+- 处理：给 Cloud Run 服务账号补 Firestore 角色
+
+5. 运行成功但没有音频文件
+- 原因：未设置 `GCS_BUCKET_NAME` 或服务账号没有存储权限
+- 处理：
+  - 检查 `GCS_BUCKET_NAME`
+  - 检查 `roles/storage.objectAdmin`
+
+6. Scheduler 调用返回 401
+- 原因：`X-Internal-Key` 不匹配
+- 处理：
+  - 确认 Scheduler Job header 中的值
+  - 确认 Secret 中的 `SCHEDULER_SHARED_SECRET`
+
+7. TTS 失败或 Gemini 503 / 429
+- 原因：模型拥塞或文本过长
+- 处理：
+  - 等待后重试
+  - 缩短 prompt 输出要求
+  - 用 `gemini-2.5-flash-preview-tts` 降低延迟
+
+========================================================================
+15. 建议的后续增强（可选）
+========================================================================
+
+1. 把 Cloud Run 改成“需要认证”，仅保留前端页面匿名访问的反向代理层
+2. 把 Scheduler 改成 OIDC 调用，而不是共享密钥 header
+3. 为下载音频增加后端鉴权代理，避免长时间 signed URL
+4. 为关键执行失败增加通知（邮件 / Telegram）
+5. 给 Firestore 增加 TTL / 归档策略，避免长期无限增长

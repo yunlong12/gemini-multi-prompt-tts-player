@@ -1,0 +1,43 @@
+# Logs and local exports
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.local
+secrets/
+*.secret
+*.secrets
+
+# Local user/session data
+migrated_prompt_history/
+server/data/
+
+# Build and dependencies
+node_modules
+dist
+dist-ssr
+
+# Temp and backup files
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

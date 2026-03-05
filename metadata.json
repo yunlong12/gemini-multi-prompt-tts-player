@@ -1,0 +1,5 @@
+{
+  "name": "Gemini Multi-Prompt TTS Player",
+  "description": "An application that takes multiple prompts, generates text answers using Gemini 3 Pro with Google Search grounding, converts them to speech using Gemini 2.5 Flash TTS, and plays them sequentially.",
+  "requestFramePermissions": []
+}
