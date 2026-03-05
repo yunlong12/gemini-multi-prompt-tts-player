@@ -1,20 +1,72 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# Gemini Multi-Prompt TTS Player
 
-# Run and deploy your AI Studio app
+A full-stack app for generating grounded news/text answers with Gemini, converting them to speech, and playing both manual results and scheduled runs from a unified player UI.
 
-This contains everything you need to run your app locally.
+## What It Does
 
-View your app in AI Studio: https://ai.studio/apps/ffe20bc2-0768-4ef5-a03f-c6d57cad092e
+- Accepts multiple prompts and generates grounded answers with Gemini plus Google Search
+- Converts answers to speech and plays them in the browser
+- Stores prompt history locally for manual runs
+- Supports admin login, schedules, run history, and Cloud Scheduler polling
+- Stores scheduled run artifacts in Google Cloud Storage
 
-## Run Locally
+## Stack
 
-**Prerequisites:**  Node.js
+- Frontend: React + TypeScript + Vite
+- Backend: Express
+- AI: Gemini text generation and TTS
+- Persistence: Firestore and Google Cloud Storage
+- Deployment: Google Cloud Run + Cloud Scheduler
 
+## Local Development
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+Prerequisites:
+
+- Node.js 18+
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Create a local env file:
+
+```bash
+cp .env.example .env.local
+```
+
+Set the required values in `.env.local`:
+
+- `GEMINI_API_KEY`
+- `API_BASE_URL` if you are pointing the frontend at a non-default backend
+
+Start the app:
+
+```bash
+npm run dev
+```
+
+## Production And Deployment
+
+The app is designed to run on Google Cloud Run.
+
+Deployment reference:
+
+- [google-cloud-deploy-guide.txt](./google-cloud-deploy-guide.txt)
+
+Infrastructure used by the deployed app:
+
+- Cloud Run for the web app and API
+- Firestore for schedules and run metadata
+- Cloud Storage for generated JSON and WAV artifacts
+- Cloud Scheduler for polling due schedules
+
+## Repository Notes
+
+- Local logs, `.env` files, migrated prompt history, and other machine-specific artifacts are ignored in `.gitignore`
+- Scheduled run Firestore indexes are defined in [firestore.indexes.json](./firestore.indexes.json)
+
+## Public Repo Gaps
+
+This repository still does not include a `LICENSE` file. Without a license, other people cannot legally reuse or redistribute the code. If you want this repo to be truly open source, add an explicit license.
