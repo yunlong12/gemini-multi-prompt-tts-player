@@ -67,6 +67,6 @@ Infrastructure used by the deployed app:
 - Local logs, `.env` files, migrated prompt history, and other machine-specific artifacts are ignored in `.gitignore`
 - Scheduled run Firestore indexes are defined in [firestore.indexes.json](./firestore.indexes.json)
 
-## Public Repo Gaps
+## License
 
-This repository still does not include a `LICENSE` file. Without a license, other people cannot legally reuse or redistribute the code. If you want this repo to be truly open source, add an explicit license.
+MIT. See [LICENSE](./LICENSE).
