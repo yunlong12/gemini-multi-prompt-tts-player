@@ -423,6 +423,64 @@ const App: React.FC = () => {
     void clearPersistedState();
   };
   const resultsItems = items.filter((item) => Date.now() - item.timestamp < ONE_HOUR_MS);
+  const persistedScheduledHistory = Object.values(persistedScheduledRuns);
+  const historyEntries = [
+    ...items.map((item) => ({
+      id: `manual:${item.id}`,
+      source: 'manual' as const,
+      timestamp: item.timestamp,
+      title: item.prompt,
+      body: item.answer || 'No answer',
+      playable: Boolean(item.audioBuffer),
+      isActive: item.status === ItemStatus.PLAYING || selectedItemId === item.id,
+      onPlay: () => {
+        if (!item.audioBuffer) return;
+        setSelectedItemId(item.id);
+        setPlayerAutoplayRequestId(`manual:${item.id}`);
+        setActiveTab('player');
+      },
+      onDelete: () => {
+        const target = items.find((entry) => entry.id === item.id);
+        if (!target || !window.confirm(`Delete "${target.prompt.substring(0, 30)}..."?`)) return;
+        processingQueueRef.current = processingQueueRef.current.filter((queueId) => queueId !== item.id);
+        if (selectedItemId === item.id) {
+          setSelectedItemId(null);
+        }
+        if (playerAutoplayRequestId === `manual:${item.id}`) {
+          setPlayerAutoplayRequestId(null);
+        }
+        setItems((prev) => prev.filter((entry) => entry.id !== item.id));
+        addLog(`[History] Deleted manual item "${target.prompt}".`);
+      },
+    })),
+    ...persistedScheduledHistory.map((run) => ({
+      id: `scheduled:${run.id}`,
+      source: 'scheduled' as const,
+      timestamp: new Date(run.startedAt).getTime(),
+      title: run.resolvedPrompt,
+      body: run.generatedText || run.errorMessage || 'No text available',
+      playable: Boolean(run.audioWavBase64 || run.audioPath),
+      isActive: playerAutoplayRequestId === `scheduled:${run.id}`,
+      onPlay: () => {
+        setSelectedItemId(null);
+        setPlayerAutoplayRequestId(`scheduled:${run.id}`);
+        setActiveTab('player');
+      },
+      onDelete: () => {
+        const target = persistedScheduledRuns[run.id];
+        if (!target || !window.confirm(`Delete scheduled history "${target.resolvedPrompt.substring(0, 30)}..."?`)) return;
+        if (playerAutoplayRequestId === `scheduled:${run.id}`) {
+          setPlayerAutoplayRequestId(null);
+        }
+        setPersistedScheduledRuns((prev) => {
+          const next = { ...prev };
+          delete next[run.id];
+          return next;
+        });
+        addLog(`[History] Deleted scheduled history "${target.resolvedPrompt}".`);
+      },
+    })),
+  ].sort((a, b) => b.timestamp - a.timestamp);
   const adminPanel = !isAdminAuthenticated
     ? <LoginForm onLogin={handleAdminLogin} isLoading={isAuthLoading} />
     : <>
@@ -540,7 +598,7 @@ const App: React.FC = () => {
           ))}
         </div>
 
-        {!isProcessingActive && items.length > 0 && (
+        {!isProcessingActive && (items.length > 0 || persistedScheduledHistory.length > 0) && (
           <button
             onClick={resetAll}
             className="inline-flex items-center justify-center gap-2 self-start rounded-full border border-red-900/40 bg-red-950/20 px-4 py-2 text-sm font-medium text-red-200 transition-colors hover:bg-red-950/35 hover:text-red-100 lg:self-auto"
@@ -583,10 +641,10 @@ const App: React.FC = () => {
       )}
 
       {activeTab === 'history' && <div className="bg-slate-900 rounded-lg border border-slate-800 p-4 mb-10 space-y-4">
-        <div className="flex flex-wrap items-center gap-3 justify-between border-b border-slate-800 pb-4"><div className="flex items-center gap-2 text-slate-200 font-semibold"><ListMusic size={18} /> History (Stored in IndexedDB)</div><div className="text-xs text-slate-500 italic">All manually generated items are stored here.</div></div>
-        {!items.length && <div className="text-center py-10 text-slate-600 italic">No history items yet.</div>}
+        <div className="flex flex-wrap items-center gap-3 justify-between border-b border-slate-800 pb-4"><div className="flex items-center gap-2 text-slate-200 font-semibold"><ListMusic size={18} /> History (Stored in IndexedDB)</div><div className="text-xs text-slate-500 italic">Manual items and locally cached scheduled runs are stored here.</div></div>
+        {!historyEntries.length && <div className="text-center py-10 text-slate-600 italic">No history items yet.</div>}
         <div className="space-y-3 max-h-[520px] overflow-y-auto pr-1">
-          {items.map((item) => <div key={item.id} className={`rounded-lg border p-4 flex flex-col gap-2 ${item.status === ItemStatus.PLAYING ? 'border-emerald-500/60 bg-emerald-500/10' : selectedItemId === item.id ? 'border-blue-500/60 bg-blue-500/5' : 'border-slate-800 bg-slate-800/40'}`}><div className="flex justify-between items-start gap-4"><div className="min-w-0 flex-1"><div className="text-xs text-slate-500 mb-1">{new Date(item.timestamp).toLocaleString()}</div><div className="text-sm font-bold text-slate-100 break-words mb-1">{item.prompt}</div><div className="text-xs text-slate-400 line-clamp-2">{item.answer || 'No answer'}</div></div><div className="flex flex-col gap-2 shrink-0 w-32"><button onClick={() => { if (!item.audioBuffer) return; setSelectedItemId(item.id); setPlayerAutoplayRequestId(`manual:${item.id}`); setActiveTab('player'); }} disabled={!item.audioBuffer} className={`px-3 py-2 rounded-md text-sm font-semibold flex items-center gap-2 justify-center ${item.audioBuffer ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-slate-800 text-slate-500 cursor-not-allowed'}`}><PlayCircle size={16} /> Play</button><button onClick={(e) => { e.stopPropagation(); const target = items.find((entry) => entry.id === item.id); if (!target || !window.confirm(`Delete "${target.prompt.substring(0, 30)}..."?`)) return; processingQueueRef.current = processingQueueRef.current.filter((queueId) => queueId !== item.id); if (selectedItemId === item.id) { setSelectedItemId(null); } if (playerAutoplayRequestId === `manual:${item.id}`) { setPlayerAutoplayRequestId(null); } setItems((prev) => prev.filter((entry) => entry.id !== item.id)); }} className="px-3 py-2 rounded-md text-sm font-semibold bg-red-900/20 text-red-400 hover:bg-red-900/40 border border-red-900/30 flex items-center gap-2 justify-center"><Trash2 size={16} /> Delete</button></div></div></div>)}
+          {historyEntries.map((entry) => <div key={entry.id} className={`rounded-lg border p-4 flex flex-col gap-2 ${entry.isActive ? 'border-emerald-500/60 bg-emerald-500/10' : 'border-slate-800 bg-slate-800/40'}`}><div className="flex justify-between items-start gap-4"><div className="min-w-0 flex-1"><div className="flex items-center gap-2 mb-1"><div className="text-xs text-slate-500">{new Date(entry.timestamp).toLocaleString()}</div><span className={`text-[10px] uppercase tracking-wide px-2 py-1 rounded-full ${entry.source === 'manual' ? 'bg-blue-950/40 text-blue-300 border border-blue-900/40' : 'bg-emerald-950/40 text-emerald-300 border border-emerald-900/40'}`}>{entry.source}</span></div><div className="text-sm font-bold text-slate-100 break-words mb-1">{entry.title}</div><div className="text-xs text-slate-400 line-clamp-3">{entry.body}</div></div><div className="flex flex-col gap-2 shrink-0 w-32"><button onClick={entry.onPlay} disabled={!entry.playable} className={`px-3 py-2 rounded-md text-sm font-semibold flex items-center gap-2 justify-center ${entry.playable ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-slate-800 text-slate-500 cursor-not-allowed'}`}><PlayCircle size={16} /> Play</button><button onClick={entry.onDelete} className="px-3 py-2 rounded-md text-sm font-semibold bg-red-900/20 text-red-400 hover:bg-red-900/40 border border-red-900/30 flex items-center gap-2 justify-center"><Trash2 size={16} /> Delete</button></div></div></div>)}
         </div>
       </div>}
 

@@ -488,8 +488,26 @@ app.post('/api/internal/execute-schedule/:id', requireInternalAuth, async (req, 
   }
 });
 
-app.use(express.static(distPath));
+app.use(
+  express.static(distPath, {
+    setHeaders: (res, filePath) => {
+      const normalizedPath = filePath.replace(/\\/g, '/');
+      if (normalizedPath.endsWith('/index.html')) {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        return;
+      }
+
+      if (normalizedPath.includes('/assets/')) {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        return;
+      }
+
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+    },
+  })
+);
 app.get(/^(?!\/api)(?!.*\.[a-zA-Z0-9]+$).*/, (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   res.sendFile(path.join(distPath, 'index.html'));
 });
 
