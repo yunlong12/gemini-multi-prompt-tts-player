@@ -40,6 +40,76 @@ const app = express();
 app.use(express.json({ limit: '1mb' }));
 app.use(requestLogger);
 
+function getInternalBaseUrl(req) {
+  const explicitBaseUrl =
+    String(process.env.APP_BASE_URL || process.env.CLOUD_RUN_SERVICE_URL || '').trim();
+
+  if (explicitBaseUrl) {
+    return explicitBaseUrl.replace(/\/+$/, '');
+  }
+
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').trim();
+  const protocol = forwardedProto || req.protocol || 'https';
+  const host = req.get('host');
+  return `${protocol}://${host}`;
+}
+
+async function dispatchScheduleExecution(req, schedule, options = {}) {
+  const baseUrl = getInternalBaseUrl(req);
+  const internalSecret = process.env.SCHEDULER_SHARED_SECRET;
+  const requestId = options.requestId || req.requestId;
+  const dispatchUrl = `${baseUrl}/api/internal/execute-schedule/${encodeURIComponent(schedule.id)}`;
+
+  if (!internalSecret) {
+    throw new Error('Missing SCHEDULER_SHARED_SECRET in environment.');
+  }
+
+  logInfo('scheduler', 'dispatch.start', {
+    requestId,
+    scheduleId: schedule.id,
+    dispatchUrl,
+  });
+
+  void fetch(dispatchUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Internal-Key': internalSecret,
+      'X-Request-Id': `${requestId}:${schedule.id}`,
+    },
+    body: JSON.stringify({
+      triggeredBy: options.triggeredBy || 'scheduler',
+      parentRequestId: requestId,
+      dispatchedAt: new Date().toISOString(),
+    }),
+  })
+    .then(async (response) => {
+      const responseText = await response.text();
+      if (!response.ok) {
+        logWarn('scheduler', 'dispatch.response_not_ok', {
+          requestId,
+          scheduleId: schedule.id,
+          statusCode: response.status,
+          body: responseText.slice(0, 500),
+        });
+        return;
+      }
+
+      logInfo('scheduler', 'dispatch.accepted', {
+        requestId,
+        scheduleId: schedule.id,
+        statusCode: response.status,
+      });
+    })
+    .catch((error) => {
+      logError('scheduler', 'dispatch.error', {
+        requestId,
+        scheduleId: schedule.id,
+        error,
+      });
+    });
+}
+
 app.get('/api/health', (_req, res) => {
   logInfo('api.health', 'health.check');
   res.json({ ok: true });
@@ -286,16 +356,17 @@ app.post('/api/internal/run-due-schedules', requireInternalAuth, async (_req, re
 
     for (const schedule of dueSchedules) {
       try {
-        const run = await executeSchedule(schedule, { triggeredBy: 'scheduler' });
-        if (run) {
-          results.push({ scheduleId: schedule.id, status: 'success', runId: run.id });
-        }
+        await dispatchScheduleExecution(_req, schedule, {
+          requestId: _req.requestId,
+          triggeredBy: 'scheduler',
+        });
+        results.push({ scheduleId: schedule.id, status: 'dispatched' });
       } catch (error) {
-        logError('scheduler', 'execute.error', { requestId: _req.requestId, scheduleId: schedule.id, error });
+        logError('scheduler', 'dispatch.failed', { requestId: _req.requestId, scheduleId: schedule.id, error });
         results.push({
           scheduleId: schedule.id,
-          status: 'error',
-          message: error?.message || 'Failed to execute schedule',
+          status: 'dispatch_error',
+          message: error?.message || 'Failed to dispatch schedule',
         });
       }
     }
@@ -309,6 +380,61 @@ app.post('/api/internal/run-due-schedules', requireInternalAuth, async (_req, re
   } catch (error) {
     logError('scheduler', 'due_check.error', { requestId: _req.requestId, error });
     return res.status(500).json({ message: error?.message || 'Failed to run due schedules' });
+  }
+});
+
+app.post('/api/internal/execute-schedule/:id', requireInternalAuth, async (req, res) => {
+  try {
+    const schedule = await getSchedule(req.params.id);
+    if (!schedule) {
+      logWarn('scheduler', 'execute_single.not_found', {
+        requestId: req.requestId,
+        scheduleId: req.params.id,
+      });
+      return res.status(404).json({ message: 'Schedule not found' });
+    }
+
+    logInfo('scheduler', 'execute_single.start', {
+      requestId: req.requestId,
+      scheduleId: schedule.id,
+      triggeredBy: req.body?.triggeredBy || 'scheduler',
+      parentRequestId: req.body?.parentRequestId || null,
+    });
+
+    const run = await executeSchedule(schedule, {
+      triggeredBy: req.body?.triggeredBy || 'scheduler',
+    });
+
+    if (!run) {
+      logWarn('scheduler', 'execute_single.skipped', {
+        requestId: req.requestId,
+        scheduleId: schedule.id,
+      });
+      return res.status(202).json({
+        scheduleId: schedule.id,
+        status: 'skipped',
+      });
+    }
+
+    logInfo('scheduler', 'execute_single.success', {
+      requestId: req.requestId,
+      scheduleId: schedule.id,
+      runId: run.id,
+      status: run.status,
+    });
+
+    return res.status(202).json({
+      scheduleId: schedule.id,
+      runId: run.id,
+      status: run.status,
+    });
+  } catch (error) {
+    logError('scheduler', 'execute_single.error', {
+      requestId: req.requestId,
+      scheduleId: req.params.id,
+      error,
+    });
+    return res.status(500).json({ message: error?.message || 'Failed to execute schedule' });
   }
 });
 
