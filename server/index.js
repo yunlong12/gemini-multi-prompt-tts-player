@@ -2,8 +2,10 @@ import express from 'express';
 import dotenv from 'dotenv';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createSession, requireAuth } from './middleware/auth.js';
+import { clearSessionCookie, createSession, getSessionFromRequest, requireAuth, setSessionCookie } from './middleware/auth.js';
+import { requireTrustedOrigin } from './middleware/csrf.js';
 import { requireInternalAuth } from './middleware/internalAuth.js';
+import { createRateLimit } from './middleware/rateLimit.js';
 import { DEFAULT_TTS_MODEL, generateGroundedText, generateSpeechBase64 } from './services/gemini.js';
 import {
   createSchedule,
@@ -37,8 +39,30 @@ const __dirname = path.dirname(__filename);
 const distPath = path.resolve(__dirname, '..', 'dist');
 
 const app = express();
+app.set('trust proxy', true);
 app.use(express.json({ limit: '1mb' }));
 app.use(requestLogger);
+
+const loginRateLimit = createRateLimit({
+  scope: 'auth.login',
+  windowMs: Number(process.env.AUTH_LOGIN_RATE_LIMIT_WINDOW_MS || 24 * 60 * 60 * 1000),
+  maxRequests: Number(process.env.AUTH_LOGIN_RATE_LIMIT_MAX || 100),
+  message: 'Daily login limit reached: 100 attempts per day.',
+});
+
+const textRateLimit = createRateLimit({
+  scope: 'api.text',
+  windowMs: Number(process.env.TEXT_RATE_LIMIT_WINDOW_MS || 24 * 60 * 60 * 1000),
+  maxRequests: Number(process.env.TEXT_RATE_LIMIT_MAX || 200),
+  message: 'Daily text generation limit reached: 200 requests per day.',
+});
+
+const ttsRateLimit = createRateLimit({
+  scope: 'api.tts',
+  windowMs: Number(process.env.TTS_RATE_LIMIT_WINDOW_MS || 24 * 60 * 60 * 1000),
+  maxRequests: Number(process.env.TTS_RATE_LIMIT_MAX || 200),
+  message: 'Daily TTS limit reached: 200 requests per day.',
+});
 
 function getInternalBaseUrl(req) {
   const explicitBaseUrl =
@@ -115,7 +139,7 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/text', async (req, res) => {
+app.post('/api/text', requireTrustedOrigin, textRateLimit, async (req, res) => {
   try {
     const prompt = String(req.body?.prompt || '').trim();
     logInfo('api.text', 'generate.start', {
@@ -140,7 +164,7 @@ app.post('/api/text', async (req, res) => {
   }
 });
 
-app.post('/api/tts', async (req, res) => {
+app.post('/api/tts', requireTrustedOrigin, ttsRateLimit, async (req, res) => {
   try {
     const text = String(req.body?.text || '').trim();
     const model = String(req.body?.model || DEFAULT_TTS_MODEL).trim() || DEFAULT_TTS_MODEL;
@@ -166,7 +190,7 @@ app.post('/api/tts', async (req, res) => {
   }
 });
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', requireTrustedOrigin, loginRateLimit, (req, res) => {
   try {
     const password = String(req.body?.password || '');
     logInfo('api.auth', 'login.attempt', { requestId: req.requestId, passwordLength: password.length });
@@ -176,13 +200,39 @@ app.post('/api/auth/login', (req, res) => {
       return res.status(401).json({ message: 'Invalid password' });
     }
 
+    setSessionCookie(res, session.cookieValue);
     logInfo('api.auth', 'login.success', { requestId: req.requestId, expiresAt: session.expiresAt });
-    return res.json(session);
+    return res.json({ expiresAt: session.expiresAt });
   } catch (error) {
     const message = error?.message || 'Failed to create session';
     logError('api.auth', 'login.error', { requestId: req.requestId, error });
     return res.status(500).json({ message });
   }
+});
+
+app.get('/api/auth/session', (req, res) => {
+  try {
+    const session = getSessionFromRequest(req);
+    if (!session) {
+      logWarn('api.auth', 'session.missing', { requestId: req.requestId });
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+
+    logInfo('api.auth', 'session.valid', {
+      requestId: req.requestId,
+      expiresAt: session.expiresAt,
+    });
+    return res.json({ expiresAt: session.expiresAt });
+  } catch (error) {
+    logError('api.auth', 'session.error', { requestId: req.requestId, error });
+    return res.status(500).json({ message: error?.message || 'Failed to get session' });
+  }
+});
+
+app.post('/api/auth/logout', requireTrustedOrigin, (req, res) => {
+  clearSessionCookie(res);
+  logInfo('api.auth', 'logout.success', { requestId: req.requestId });
+  return res.status(204).send();
 });
 
 app.get('/api/schedules', requireAuth, async (_req, res) => {
@@ -196,7 +246,7 @@ app.get('/api/schedules', requireAuth, async (_req, res) => {
   }
 });
 
-app.post('/api/schedules', requireAuth, async (req, res) => {
+app.post('/api/schedules', requireAuth, requireTrustedOrigin, async (req, res) => {
   try {
     const schedule = await createSchedule(req.body || {});
     logInfo('api.schedules', 'create.success', {
@@ -212,7 +262,7 @@ app.post('/api/schedules', requireAuth, async (req, res) => {
   }
 });
 
-app.put('/api/schedules/:id', requireAuth, async (req, res) => {
+app.put('/api/schedules/:id', requireAuth, requireTrustedOrigin, async (req, res) => {
   try {
     const schedule = await updateSchedule(req.params.id, req.body || {});
     if (!schedule) {
@@ -230,7 +280,7 @@ app.put('/api/schedules/:id', requireAuth, async (req, res) => {
   }
 });
 
-app.delete('/api/schedules/:id', requireAuth, async (req, res) => {
+app.delete('/api/schedules/:id', requireAuth, requireTrustedOrigin, async (req, res) => {
   try {
     const deleted = await deleteSchedule(req.params.id);
     if (!deleted) {
@@ -244,7 +294,7 @@ app.delete('/api/schedules/:id', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/schedules/:id/run-now', requireAuth, async (req, res) => {
+app.post('/api/schedules/:id/run-now', requireAuth, requireTrustedOrigin, async (req, res) => {
   try {
     const schedule = await getSchedule(req.params.id);
     if (!schedule) {
@@ -313,7 +363,7 @@ app.get('/api/scheduler/config', requireAuth, async (_req, res) => {
   }
 });
 
-app.put('/api/scheduler/config', requireAuth, async (req, res) => {
+app.put('/api/scheduler/config', requireAuth, requireTrustedOrigin, async (req, res) => {
   try {
     const config = await updateSchedulerConfig(req.body || {});
     logInfo('api.scheduler', 'config.update.success', {
@@ -328,7 +378,7 @@ app.put('/api/scheduler/config', requireAuth, async (req, res) => {
   }
 });
 
-app.get(/^\/api\/artifacts\/(.+)$/, async (req, res) => {
+app.get(/^\/api\/artifacts\/(.+)$/, requireAuth, async (req, res) => {
   try {
     const artifactPath = decodeURIComponent(req.params[0] || '');
     logInfo('api.artifacts', 'read.start', { requestId: req.requestId, artifactPath });

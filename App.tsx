@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import { CalendarClock, ListMusic, PlayCircle, RotateCcw, Terminal, Trash2 } from 'lucide-react';
+import { AlertTriangle, CalendarClock, ListMusic, PlayCircle, RotateCcw, Terminal, Trash2 } from 'lucide-react';
 import { InputSection } from './components/InputSection';
 import { LoginForm } from './components/LoginForm';
 import { ResultCard } from './components/ResultCard';
@@ -8,17 +8,29 @@ import { RunHistoryList } from './components/RunHistoryList';
 import { ScheduleForm } from './components/ScheduleForm';
 import { ScheduleList } from './components/ScheduleList';
 import { UnifiedPlayer } from './components/UnifiedPlayer';
-import { createSchedule as createScheduleApi, deleteSchedule as deleteScheduleApi, fetchRuns, fetchSchedules, fetchSchedulerConfig, login, runScheduleNow, updateSchedule as updateScheduleApi, updateSchedulerConfig as updateSchedulerConfigApi } from './services/adminApi';
+import {
+  createSchedule as createScheduleApi,
+  deleteSchedule as deleteScheduleApi,
+  fetchAuthSession,
+  fetchRuns,
+  fetchSchedules,
+  fetchSchedulerConfig,
+  login,
+  logout as logoutApi,
+  runScheduleNow,
+  updateSchedule as updateScheduleApi,
+  updateSchedulerConfig as updateSchedulerConfigApi,
+} from './services/adminApi';
 import { generateSpeech, generateTextAnswer } from './services/geminiService';
 import { AuthSession, ItemStatus, ProcessItem, Schedule, SchedulerConfig, ScheduleRun } from './types';
 import { decodeAudioData } from './utils/audioUtils';
-import { clearPersistedState, loadPersistedState, PersistedState, savePersistedState } from './utils/storage';
+import { clearPersistedState, loadPersistedState, PersistedScheduledRun, PersistedState, savePersistedState } from './utils/storage';
 
 const ONE_HOUR_MS = 3600000;
 const DEFAULT_TTS_MODEL = 'gemini-2.5-pro-preview-tts';
-const SESSION_KEY = 'gemini-admin-session';
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const POLLING_PRESETS = [1, 5, 10, 15, 30, 60];
+type RateLimitScope = 'login' | 'text' | 'tts';
 
 const cronToMinutes = (cron: string): number | null => {
   const normalized = String(cron || '').trim();
@@ -52,11 +64,17 @@ const App: React.FC = () => {
   const [adminError, setAdminError] = useState('');
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [runs, setRuns] = useState<ScheduleRun[]>([]);
+  const [persistedScheduledRuns, setPersistedScheduledRuns] = useState<Record<string, PersistedScheduledRun>>({});
   const [schedulerConfig, setSchedulerConfig] = useState<SchedulerConfig | null>(null);
   const [schedulerIntervalMinutesDraft, setSchedulerIntervalMinutesDraft] = useState(5);
   const [schedulerTimezoneDraft, setSchedulerTimezoneDraft] = useState('Europe/Paris');
   const [isSchedulerSaving, setIsSchedulerSaving] = useState(false);
   const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null);
+  const [rateLimitWarnings, setRateLimitWarnings] = useState<Record<RateLimitScope, string>>({
+    login: '',
+    text: '',
+    tts: '',
+  });
   const stopProcessingRef = useRef(false);
   const processingQueueRef = useRef<string[]>([]);
   const isWorkerRunningRef = useRef(false);
@@ -65,11 +83,20 @@ const App: React.FC = () => {
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   const addLog = (msg: string) => setLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
-  const token = authSession?.token || '';
+  const isAdminAuthenticated = Boolean(authSession);
+  const isUnauthorizedError = (error: unknown) =>
+    String((error as Error | undefined)?.message || '').toLowerCase().includes('unauthorized');
+  const isRateLimitError = (error: unknown) => Number((error as Error & { status?: number } | undefined)?.status) === 429;
+  const setRateLimitWarning = (scope: RateLimitScope, message: string) =>
+    setRateLimitWarnings((prev) => ({ ...prev, [scope]: message }));
+  const clearRateLimitWarning = (scope: RateLimitScope) =>
+    setRateLimitWarnings((prev) => (prev[scope] ? { ...prev, [scope]: '' } : prev));
+  const activeRateLimitWarnings = (Object.entries(rateLimitWarnings) as [RateLimitScope, string][])
+    .filter(([, message]) => Boolean(message));
+  const generationWarningMessage = [rateLimitWarnings.text, rateLimitWarnings.tts].filter(Boolean).join(' ');
 
   const clearAdminSession = () => {
     addLog('[Auth] Clearing admin session and cached admin data.');
-    localStorage.removeItem(SESSION_KEY);
     setAuthSession(null);
     setSchedules([]);
     setRuns([]);
@@ -79,9 +106,9 @@ const App: React.FC = () => {
     setEditingSchedule(null);
   };
 
-  const refreshAdminData = async (authToken = token) => {
-    if (!authToken) {
-      addLog('[Admin] Skipped refresh because token is missing.');
+  const refreshAdminData = async () => {
+    if (!isAdminAuthenticated) {
+      addLog('[Admin] Skipped refresh because admin session is missing.');
       return;
     }
     addLog('[Admin] Refreshing schedules/runs/scheduler config...');
@@ -89,14 +116,14 @@ const App: React.FC = () => {
     setAdminError('');
     try {
       const [nextSchedules, nextRuns] = await Promise.all([
-        fetchSchedules(authToken),
-        fetchRuns(authToken),
+        fetchSchedules(),
+        fetchRuns(),
       ]);
       setSchedules(nextSchedules);
       setRuns(nextRuns);
       addLog(`[Admin] Refreshed ${nextSchedules.length} schedule(s) and ${nextRuns.length} run(s).`);
       try {
-        const nextSchedulerConfig = await fetchSchedulerConfig(authToken);
+        const nextSchedulerConfig = await fetchSchedulerConfig();
         setSchedulerConfig(nextSchedulerConfig);
         setSchedulerIntervalMinutesDraft(cronToMinutes(nextSchedulerConfig.schedule || '') || 5);
         setSchedulerTimezoneDraft(nextSchedulerConfig.timeZone || 'Europe/Paris');
@@ -109,7 +136,9 @@ const App: React.FC = () => {
       }
     } catch (error: any) {
       addLog(`[Admin] Refresh failed: ${error?.message || error}`);
-      if (String(error?.message || '').toLowerCase().includes('unauthorized')) clearAdminSession();
+      if (isUnauthorizedError(error)) {
+        clearAdminSession();
+      }
       setAdminError(error?.message || 'Failed to refresh admin data');
     } finally {
       setIsAdminRefreshing(false);
@@ -120,26 +149,22 @@ const App: React.FC = () => {
   useEffect(() => { itemsRef.current = items; }, [items]);
   useEffect(() => { addLog(`[UI] Active tab changed to "${activeTab}".`); }, [activeTab]);
   useEffect(() => {
-    const raw = localStorage.getItem(SESSION_KEY);
-    if (!raw) {
-      addLog('[Auth] No saved admin session in localStorage.');
-      return;
-    }
-    try {
-      const parsed = JSON.parse(raw) as AuthSession;
-      if (new Date(parsed.expiresAt).getTime() > Date.now()) {
-        addLog(`[Auth] Restored admin session from localStorage, expires at ${parsed.expiresAt}.`);
-        setAuthSession(parsed);
-      } else {
-        addLog('[Auth] Saved admin session expired, removing local copy.');
-        localStorage.removeItem(SESSION_KEY);
+    const bootstrapAuth = async () => {
+      try {
+        const session = await fetchAuthSession();
+        addLog(`[Auth] Restored admin session from cookie, expires at ${session.expiresAt}.`);
+        setAuthSession(session);
+      } catch (error) {
+        if (isUnauthorizedError(error)) {
+          addLog('[Auth] No valid admin session cookie found.');
+          return;
+        }
+        addLog(`[Auth] Failed to restore admin session: ${(error as Error)?.message || error}`);
       }
-    } catch {
-      addLog('[Auth] Failed to parse saved admin session, removing local copy.');
-      localStorage.removeItem(SESSION_KEY);
-    }
+    };
+    void bootstrapAuth();
   }, []);
-  useEffect(() => { if (token) void refreshAdminData(token); }, [token]);
+  useEffect(() => { if (isAdminAuthenticated) void refreshAdminData(); }, [isAdminAuthenticated]);
   useEffect(() => {
     const loadState = async () => {
       try {
@@ -164,6 +189,9 @@ const App: React.FC = () => {
             [...hydratedItems, ...prev].forEach((item) => unique.set(item.id, item));
             return Array.from(unique.values()).sort((a, b) => b.timestamp - a.timestamp);
           });
+          setPersistedScheduledRuns(
+            Object.fromEntries((persisted.scheduledRuns || []).map((run) => [run.id, run]))
+          );
           addLog('Loaded saved session from IndexedDB.');
         }
         if (!persisted) addLog('[Storage] No persisted state found.');
@@ -180,13 +208,14 @@ const App: React.FC = () => {
     const timeout = setTimeout(async () => {
       const state: PersistedState = {
         items: items.map((item) => ({ id: item.id, prompt: item.prompt, answer: item.answer, groundingLinks: item.groundingLinks, audioBase64: item.audioBase64, ttsModel: item.ttsModel, error: item.error, status: item.status, timestamp: item.timestamp })),
+        scheduledRuns: Object.values(persistedScheduledRuns),
         recentPrompts: [],
         updatedAt: Date.now(),
       };
       try { await savePersistedState(state); } catch (e: any) { addLog(`Persistence Error: ${e.message || e}`); }
     }, 1000);
     return () => clearTimeout(timeout);
-  }, [items, isHydrating]);
+  }, [items, isHydrating, persistedScheduledRuns]);
 
   const getAudioContext = () => {
     if (!audioContextRef.current) {
@@ -213,14 +242,18 @@ const App: React.FC = () => {
         if (!currentItem) { addLog(`Skipping removed item ${currentId.slice(0, 8)}.`); continue; }
         const currentPrompt = currentItem.prompt;
         const modelForItem = currentItem.ttsModel || DEFAULT_TTS_MODEL;
+        let currentStage: RateLimitScope = 'text';
         addLog(`Processing "${currentPrompt}" (${processingQueueRef.current.length} queued after this).`);
         setItems((prev) => prev.map((item) => item.id === currentId ? { ...item, status: ItemStatus.GENERATING_TEXT, error: undefined } : item));
         try {
           const { text, groundingLinks } = await generateTextAnswer(currentPrompt, addLog);
+          clearRateLimitWarning('text');
           if (stopProcessingRef.current) { setItems((prev) => prev.map((item) => item.id === currentId ? { ...item, status: ItemStatus.ERROR, error: 'Stopped by user.' } : item)); break; }
           if (!itemsRef.current.some((item) => item.id === currentId)) { addLog(`Item deleted during processing, skipping "${currentPrompt}".`); continue; }
           setItems((prev) => prev.map((item) => item.id === currentId ? { ...item, answer: text, groundingLinks, status: ItemStatus.GENERATING_AUDIO } : item));
+          currentStage = 'tts';
           const base64Audio = await generateSpeech(text, modelForItem, addLog);
+          clearRateLimitWarning('tts');
           if (stopProcessingRef.current) { setItems((prev) => prev.map((item) => item.id === currentId ? { ...item, status: ItemStatus.ERROR, error: 'Stopped by user.' } : item)); break; }
           if (!itemsRef.current.some((item) => item.id === currentId)) { addLog(`Item deleted before audio decode, skipping "${currentPrompt}".`); continue; }
           const audioBuffer = await decodeAudioData(base64Audio, getAudioContext(), addLog);
@@ -230,6 +263,13 @@ const App: React.FC = () => {
           addLog(`Completed "${currentPrompt}".`);
         } catch (error: any) {
           addLog(`Error: ${error.message}`);
+          if (isRateLimitError(error)) {
+            const warningMessage =
+              currentStage === 'text'
+                ? 'Daily text generation limit reached: 200 requests per day.'
+                : 'Daily TTS limit reached: 200 requests per day.';
+            setRateLimitWarning(currentStage, warningMessage);
+          }
           setItems((prev) => prev.map((item) => item.id === currentId ? { ...item, status: ItemStatus.ERROR, error: error.message } : item));
         }
       }
@@ -259,40 +299,54 @@ const App: React.FC = () => {
     setAdminError('');
     try {
       const session = await login(password);
-      localStorage.setItem(SESSION_KEY, JSON.stringify(session));
       setAuthSession(session);
+      clearRateLimitWarning('login');
       addLog(`[Auth] Admin login succeeded. Session expires at ${session.expiresAt}.`);
     } catch (error: any) {
       addLog(`[Auth] Admin login failed: ${error?.message || error}`);
+      if (isRateLimitError(error)) {
+        setRateLimitWarning('login', 'Daily login limit reached: 100 attempts per day.');
+      }
       setAdminError(error?.message || 'Login failed');
     } finally {
       setIsAuthLoading(false);
     }
   };
+  const handleAdminLogout = async () => {
+    addLog('[Auth] Signing out admin session.');
+    try {
+      await logoutApi();
+    } catch (error) {
+      addLog(`[Auth] Logout request failed, clearing local admin state anyway: ${(error as Error)?.message || error}`);
+    } finally {
+      clearAdminSession();
+    }
+  };
   const handleScheduleSave = async (payload: Partial<Schedule>) => {
-    if (!token) {
-      addLog('[Schedules] Save skipped: missing auth token.');
+    if (!isAdminAuthenticated) {
+      addLog('[Schedules] Save skipped: missing admin session.');
       return;
     }
     addLog(`[Schedules] Saving schedule (${editingSchedule ? 'update' : 'create'}) name="${payload?.name || ''}" frequency="${payload?.frequency || ''}" time="${payload?.timeOfDay || ''}".`);
     setIsScheduleSaving(true);
     setAdminError('');
     try {
-      if (editingSchedule) await updateScheduleApi(token, editingSchedule.id, payload);
-      else await createScheduleApi(token, payload);
+      if (editingSchedule) await updateScheduleApi(editingSchedule.id, payload);
+      else await createScheduleApi(payload);
       setEditingSchedule(null);
-      await refreshAdminData(token);
+      await refreshAdminData();
       addLog('[Schedules] Save succeeded and admin data refreshed.');
     } catch (error: any) {
       addLog(`[Schedules] Save failed: ${error?.message || error}`);
+      if (isUnauthorizedError(error)) clearAdminSession();
       setAdminError(error?.message || 'Failed to save schedule');
     } finally {
       setIsScheduleSaving(false);
     }
   };
   const handleScheduleDelete = async (schedule: Schedule) => {
-    if (!token) {
-      addLog('[Schedules] Delete skipped: missing auth token.');
+    if (!isAdminAuthenticated) {
+      addLog('[Schedules] Delete skipped: missing admin session.');
       return;
     }
     const confirmed = window.confirm(`Delete schedule "${schedule.name}"?`);
@@ -302,34 +356,36 @@ const App: React.FC = () => {
     }
     addLog(`[Schedules] Deleting schedule "${schedule.name}" (${schedule.id}).`);
     try {
-      await deleteScheduleApi(token, schedule.id);
+      await deleteScheduleApi(schedule.id);
       if (editingSchedule?.id === schedule.id) setEditingSchedule(null);
-      await refreshAdminData(token);
+      await refreshAdminData();
       addLog(`[Schedules] Delete succeeded for "${schedule.name}".`);
     } catch (error: any) {
       addLog(`[Schedules] Delete failed for "${schedule.name}": ${error?.message || error}`);
+      if (isUnauthorizedError(error)) clearAdminSession();
       setAdminError(error?.message || 'Failed to delete schedule');
     }
   };
   const handleScheduleRunNow = async (schedule: Schedule) => {
-    if (!token) {
-      addLog('[Schedules] Run-now skipped: missing auth token.');
+    if (!isAdminAuthenticated) {
+      addLog('[Schedules] Run-now skipped: missing admin session.');
       return;
     }
     addLog(`[Schedules] Manual run triggered for "${schedule.name}" (${schedule.id}).`);
     try {
-      const run = await runScheduleNow(token, schedule.id);
+      const run = await runScheduleNow(schedule.id);
       addLog(`[Schedules] Manual run completed for "${schedule.name}" with status=${run.status}, runId=${run.id}.`);
-      await refreshAdminData(token);
+      await refreshAdminData();
       setActiveTab('runs');
     } catch (error: any) {
       addLog(`[Schedules] Manual run failed for "${schedule.name}": ${error?.message || error}`);
+      if (isUnauthorizedError(error)) clearAdminSession();
       setAdminError(error?.message || 'Failed to run schedule');
     }
   };
   const handleSchedulerConfigSave = async () => {
-    if (!token) {
-      addLog('[Scheduler] Config save skipped: missing auth token.');
+    if (!isAdminAuthenticated) {
+      addLog('[Scheduler] Config save skipped: missing admin session.');
       return;
     }
     setIsSchedulerSaving(true);
@@ -337,7 +393,7 @@ const App: React.FC = () => {
     try {
       const cron = minutesToCron(schedulerIntervalMinutesDraft);
       addLog(`[Scheduler] Updating polling config: cron="${cron}", timezone="${schedulerTimezoneDraft.trim()}".`);
-      const updated = await updateSchedulerConfigApi(token, {
+      const updated = await updateSchedulerConfigApi({
         schedule: cron,
         timeZone: schedulerTimezoneDraft.trim(),
       });
@@ -347,6 +403,7 @@ const App: React.FC = () => {
       addLog(`Updated scheduler polling to every ${cronToMinutes(updated.schedule || '') || schedulerIntervalMinutesDraft} minute(s) (${updated.timeZone}).`);
     } catch (error: any) {
       addLog(`[Scheduler] Config update failed: ${error?.message || error}`);
+      if (isUnauthorizedError(error)) clearAdminSession();
       setAdminError(error?.message || 'Failed to update scheduler polling');
     } finally {
       setIsSchedulerSaving(false);
@@ -366,7 +423,7 @@ const App: React.FC = () => {
     void clearPersistedState();
   };
   const resultsItems = items.filter((item) => Date.now() - item.timestamp < ONE_HOUR_MS);
-  const adminPanel = !token
+  const adminPanel = !isAdminAuthenticated
     ? <LoginForm onLogin={handleAdminLogin} isLoading={isAuthLoading} />
     : <>
         <div className="flex items-center justify-between">
@@ -374,7 +431,7 @@ const App: React.FC = () => {
             <h2 className="text-xl font-semibold text-white">Schedule Manager</h2>
             <p className="text-sm text-slate-400">Cloud Scheduler can trigger these prompts in the background.</p>
           </div>
-          <button onClick={clearAdminSession} className="px-3 py-2 rounded-lg text-sm font-semibold bg-slate-800 text-slate-300 border border-slate-700 hover:bg-slate-700">Sign Out</button>
+          <button onClick={() => void handleAdminLogout()} className="px-3 py-2 rounded-lg text-sm font-semibold bg-slate-800 text-slate-300 border border-slate-700 hover:bg-slate-700">Sign Out</button>
         </div>
         {adminError && <div className="text-sm text-red-400 bg-red-950/30 border border-red-900/30 rounded-md p-3">{adminError}</div>}
         <div className="bg-slate-900 border border-slate-800 rounded-lg p-4 space-y-3">
@@ -435,7 +492,7 @@ const App: React.FC = () => {
         <div className="grid gap-6 lg:grid-cols-[minmax(0,420px),1fr]">
           <ScheduleForm initialValue={editingSchedule} onSubmit={handleScheduleSave} onCancel={() => setEditingSchedule(null)} isSaving={isScheduleSaving} />
           <div className="space-y-4">
-            <button onClick={() => void refreshAdminData(token)} disabled={isAdminRefreshing} className={`px-3 py-2 rounded-lg text-sm font-semibold ${isAdminRefreshing ? 'bg-slate-800 text-slate-500' : 'bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700'}`}>{isAdminRefreshing ? 'Refreshing...' : 'Refresh'}</button>
+            <button onClick={() => void refreshAdminData()} disabled={isAdminRefreshing} className={`px-3 py-2 rounded-lg text-sm font-semibold ${isAdminRefreshing ? 'bg-slate-800 text-slate-500' : 'bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700'}`}>{isAdminRefreshing ? 'Refreshing...' : 'Refresh'}</button>
             <ScheduleList schedules={schedules} onEdit={setEditingSchedule} onDelete={handleScheduleDelete} onRunNow={handleScheduleRunNow} />
           </div>
         </div>
@@ -447,16 +504,52 @@ const App: React.FC = () => {
         <h1 className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-emerald-400 mb-2">Gemini Audio Summarizer</h1>
         <p className="text-slate-400">Manual prompts, scheduled runs, and stored audio from one app.</p>
       </header>
-      <InputSection onProcess={processPrompts} isProcessing={isProcessingActive} />
-      <div className="flex flex-wrap gap-3 mb-6">
-        {(['results', 'player', 'history', 'schedules', 'runs'] as const).map((tab) => (
-          <button key={tab} onClick={() => setActiveTab(tab)} className={`px-4 py-2 rounded-lg font-semibold transition-all flex items-center gap-2 ${activeTab === tab ? 'bg-slate-800 text-white border border-slate-600 shadow' : 'bg-slate-900 text-slate-400 border border-slate-800'}`}>
-            {tab === 'player' && <ListMusic size={18} />}
-            {tab === 'schedules' && <CalendarClock size={18} />}
-            {tab}
+      {activeRateLimitWarnings.length > 0 && (
+        <div className="mb-6 rounded-2xl border border-amber-500/40 bg-amber-500/10 p-4 shadow-lg shadow-amber-950/20">
+          <div className="mb-3 flex items-center gap-2 text-amber-200">
+            <AlertTriangle size={18} />
+            <span className="text-sm font-semibold uppercase tracking-wide">Usage Limit Reached</span>
+          </div>
+          <div className="space-y-2">
+            {activeRateLimitWarnings.map(([scope, message]) => (
+              <div key={scope} className="rounded-xl border border-amber-500/20 bg-slate-950/40 px-4 py-3 text-sm text-amber-100">
+                <span className="mr-2 font-semibold uppercase">{scope}</span>
+                <span>{message}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <InputSection onProcess={processPrompts} isProcessing={isProcessingActive} warningMessage={generationWarningMessage} />
+      <div className="mb-6 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex flex-wrap gap-3">
+          {(['results', 'player', 'history', 'schedules', 'runs'] as const).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`px-4 py-2 rounded-lg font-semibold transition-all flex items-center gap-2 ${
+                activeTab === tab
+                  ? 'bg-slate-800 text-white border border-slate-600 shadow'
+                  : 'bg-slate-900 text-slate-400 border border-slate-800'
+              }`}
+            >
+              {tab === 'player' && <ListMusic size={18} />}
+              {tab === 'schedules' && <CalendarClock size={18} />}
+              {tab}
+            </button>
+          ))}
+        </div>
+
+        {!isProcessingActive && items.length > 0 && (
+          <button
+            onClick={resetAll}
+            className="inline-flex items-center justify-center gap-2 self-start rounded-full border border-red-900/40 bg-red-950/20 px-4 py-2 text-sm font-medium text-red-200 transition-colors hover:bg-red-950/35 hover:text-red-100 lg:self-auto"
+            title="Clear local results, logs, queue, and cached player state"
+          >
+            <RotateCcw size={16} />
+            <span>Clear Session</span>
           </button>
-        ))}
-        {!isProcessingActive && items.length > 0 && <button onClick={resetAll} className="ml-auto bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-2 rounded-lg border border-slate-700 transition-colors flex items-center gap-2"><RotateCcw size={18} /> Clear Session</button>}
+        )}
       </div>
 
       {activeTab === 'results' && <>
@@ -479,6 +572,8 @@ const App: React.FC = () => {
         <UnifiedPlayer
           items={items}
           runs={runs}
+          persistedScheduledRuns={persistedScheduledRuns}
+          setPersistedScheduledRuns={setPersistedScheduledRuns}
           setItems={setItems}
           setSelectedItemId={setSelectedItemId}
           addLog={addLog}
@@ -496,7 +591,7 @@ const App: React.FC = () => {
       </div>}
 
       {activeTab === 'schedules' && <div className="space-y-4">{adminPanel}</div>}
-      {activeTab === 'runs' && <div className="space-y-4">{!token ? <LoginForm onLogin={handleAdminLogin} isLoading={isAuthLoading} /> : <><div className="flex items-center justify-between"><div><h2 className="text-xl font-semibold text-white">Scheduled Runs</h2><p className="text-sm text-slate-400">Latest automated or manual schedule executions.</p></div><button onClick={() => void refreshAdminData(token)} disabled={isAdminRefreshing} className={`px-3 py-2 rounded-lg text-sm font-semibold ${isAdminRefreshing ? 'bg-slate-800 text-slate-500' : 'bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700'}`}>{isAdminRefreshing ? 'Refreshing...' : 'Refresh'}</button></div>{adminError && <div className="text-sm text-red-400 bg-red-950/30 border border-red-900/30 rounded-md p-3">{adminError}</div>}<RunHistoryList runs={runs} /></>}</div>}
+      {activeTab === 'runs' && <div className="space-y-4">{!isAdminAuthenticated ? <LoginForm onLogin={handleAdminLogin} isLoading={isAuthLoading} /> : <><div className="flex items-center justify-between"><div><h2 className="text-xl font-semibold text-white">Scheduled Runs</h2><p className="text-sm text-slate-400">Latest automated or manual schedule executions.</p></div><button onClick={() => void refreshAdminData()} disabled={isAdminRefreshing} className={`px-3 py-2 rounded-lg text-sm font-semibold ${isAdminRefreshing ? 'bg-slate-800 text-slate-500' : 'bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700'}`}>{isAdminRefreshing ? 'Refreshing...' : 'Refresh'}</button></div>{adminError && <div className="text-sm text-red-400 bg-red-950/30 border border-red-900/30 rounded-md p-3">{adminError}</div>}<RunHistoryList runs={runs} /></>}</div>}
     </div>
   );
 };

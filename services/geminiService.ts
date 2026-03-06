@@ -7,6 +7,14 @@ interface TextResult {
 
 type LogFn = (msg: string) => void;
 
+const toApiError = (message: string, status?: number): Error => {
+  const error = new Error(message);
+  if (typeof status === 'number') {
+    (error as Error & { status?: number }).status = status;
+  }
+  return error;
+};
+
 const cleanTextForTTS = (text: string): string => {
   if (!text) return "";
   return text
@@ -33,7 +41,7 @@ export const generateTextAnswer = async (prompt: string, log: LogFn): Promise<Te
 
     const data = await response.json();
     if (!response.ok) {
-      throw new Error(data?.message || `HTTP ${response.status}`);
+      throw toApiError(data?.message || `HTTP ${response.status}`, response.status);
     }
 
     const text = data?.text || "No response generated.";
@@ -44,7 +52,7 @@ export const generateTextAnswer = async (prompt: string, log: LogFn): Promise<Te
   } catch (error: any) {
     log(`[Text] Error: ${error.message}`);
     console.error("Text Gen Error:", error);
-    throw new Error(error.message || "Failed to generate text");
+    throw toApiError(error.message || "Failed to generate text", error?.status);
   }
 };
 
@@ -62,7 +70,7 @@ export const generateSpeech = async (text: string, model: string, log: LogFn): P
     });
     const data = await response.json();
     if (!response.ok) {
-      throw new Error(data?.message || `HTTP ${response.status}`);
+      throw toApiError(data?.message || `HTTP ${response.status}`, response.status);
     }
     const audioData = data?.audioBase64;
     if (!audioData) {
@@ -77,8 +85,8 @@ export const generateSpeech = async (text: string, model: string, log: LogFn): P
     console.error("TTS Gen Error:", error);
     
     if (error.message?.includes('500')) {
-         throw new Error("TTS Service Error (500). Text may be too complex or model is overloaded.");
-    }
-    throw new Error(error.message || "Failed to generate speech");
+         throw toApiError("TTS Service Error (500). Text may be too complex or model is overloaded.", error?.status);
+     }
+    throw toApiError(error.message || "Failed to generate speech", error?.status);
   }
 };

@@ -1,25 +1,31 @@
 import { AuthSession, Schedule, SchedulerConfig, ScheduleRun } from '../types';
 
-async function request<T>(path: string, options: RequestInit = {}, token?: string): Promise<T> {
+function toApiError(message: string, status?: number): Error {
+  const error = new Error(message);
+  if (typeof status === 'number') {
+    (error as Error & { status?: number }).status = status;
+  }
+  return error;
+}
+
+async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const startedAt = Date.now();
   const method = options.method || 'GET';
   console.info('[adminApi] request.start', {
     method,
     path,
-    hasToken: Boolean(token),
   });
+
   const headers = new Headers(options.headers || {});
   if (!headers.has('Content-Type') && options.body) {
     headers.set('Content-Type', 'application/json');
-  }
-  if (token) {
-    headers.set('Authorization', `Bearer ${token}`);
   }
 
   let response: Response;
   try {
     response = await fetch(path, {
       ...options,
+      credentials: 'same-origin',
       headers,
     });
   } catch (error) {
@@ -53,8 +59,9 @@ async function request<T>(path: string, options: RequestInit = {}, token?: strin
       durationMs: Date.now() - startedAt,
       error,
     });
-    throw new Error(`Invalid JSON response from ${path}`);
+    throw toApiError(`Invalid JSON response from ${path}`, response.status);
   }
+
   if (!response.ok) {
     console.error('[adminApi] request.error', {
       method,
@@ -63,7 +70,7 @@ async function request<T>(path: string, options: RequestInit = {}, token?: strin
       durationMs: Date.now() - startedAt,
       message: data?.message,
     });
-    throw new Error(data?.message || `HTTP ${response.status}`);
+    throw toApiError(data?.message || `HTTP ${response.status}`, response.status);
   }
 
   console.info('[adminApi] request.success', {
@@ -82,74 +89,64 @@ export async function login(password: string): Promise<AuthSession> {
   });
 }
 
-export async function fetchSchedules(token: string): Promise<Schedule[]> {
-  const data = await request<{ schedules: Schedule[] }>('/api/schedules', {}, token);
+export async function fetchAuthSession(): Promise<AuthSession> {
+  return request<AuthSession>('/api/auth/session');
+}
+
+export async function logout(): Promise<void> {
+  await request<void>('/api/auth/logout', {
+    method: 'POST',
+  });
+}
+
+export async function fetchSchedules(): Promise<Schedule[]> {
+  const data = await request<{ schedules: Schedule[] }>('/api/schedules');
   return data.schedules;
 }
 
-export async function createSchedule(token: string, payload: Partial<Schedule>): Promise<Schedule> {
-  const data = await request<{ schedule: Schedule }>(
-    '/api/schedules',
-    {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    },
-    token
-  );
+export async function createSchedule(payload: Partial<Schedule>): Promise<Schedule> {
+  const data = await request<{ schedule: Schedule }>('/api/schedules', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
   return data.schedule;
 }
 
-export async function updateSchedule(token: string, id: string, payload: Partial<Schedule>): Promise<Schedule> {
-  const data = await request<{ schedule: Schedule }>(
-    `/api/schedules/${id}`,
-    {
-      method: 'PUT',
-      body: JSON.stringify(payload),
-    },
-    token
-  );
+export async function updateSchedule(id: string, payload: Partial<Schedule>): Promise<Schedule> {
+  const data = await request<{ schedule: Schedule }>(`/api/schedules/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
   return data.schedule;
 }
 
-export async function deleteSchedule(token: string, id: string): Promise<void> {
-  await request<void>(
-    `/api/schedules/${id}`,
-    {
-      method: 'DELETE',
-    },
-    token
-  );
+export async function deleteSchedule(id: string): Promise<void> {
+  await request<void>(`/api/schedules/${id}`, {
+    method: 'DELETE',
+  });
 }
 
-export async function runScheduleNow(token: string, id: string): Promise<ScheduleRun> {
-  const data = await request<{ run: ScheduleRun }>(
-    `/api/schedules/${id}/run-now`,
-    {
-      method: 'POST',
-    },
-    token
-  );
+export async function runScheduleNow(id: string): Promise<ScheduleRun> {
+  const data = await request<{ run: ScheduleRun }>(`/api/schedules/${id}/run-now`, {
+    method: 'POST',
+  });
   return data.run;
 }
 
-export async function fetchRuns(token: string, limit = 50): Promise<ScheduleRun[]> {
-  const data = await request<{ runs: ScheduleRun[] }>(`/api/runs?limit=${limit}`, {}, token);
+export async function fetchRuns(limit = 50): Promise<ScheduleRun[]> {
+  const data = await request<{ runs: ScheduleRun[] }>(`/api/runs?limit=${limit}`);
   return data.runs;
 }
 
-export async function fetchSchedulerConfig(token: string): Promise<SchedulerConfig> {
-  const data = await request<{ config: SchedulerConfig }>('/api/scheduler/config', {}, token);
+export async function fetchSchedulerConfig(): Promise<SchedulerConfig> {
+  const data = await request<{ config: SchedulerConfig }>('/api/scheduler/config');
   return data.config;
 }
 
-export async function updateSchedulerConfig(token: string, payload: { schedule: string; timeZone: string }): Promise<SchedulerConfig> {
-  const data = await request<{ config: SchedulerConfig }>(
-    '/api/scheduler/config',
-    {
-      method: 'PUT',
-      body: JSON.stringify(payload),
-    },
-    token
-  );
+export async function updateSchedulerConfig(payload: { schedule: string; timeZone: string }): Promise<SchedulerConfig> {
+  const data = await request<{ config: SchedulerConfig }>('/api/scheduler/config', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
   return data.config;
 }

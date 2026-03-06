@@ -27,7 +27,14 @@ export interface ProcessItem {
 }
 
 export type PlayerItemSource = 'manual' | 'scheduled';
-export type PlayerItemStatus = 'ready' | 'loading' | 'error' | 'playing';
+export type PlayerItemStatus =
+  | 'ready'
+  | 'queued'
+  | 'downloading'
+  | 'decoding'
+  | 'cached'
+  | 'error'
+  | 'playing';
 
 export interface PlayerItem {
   id: string;
@@ -85,7 +92,6 @@ export interface ScheduleRun {
 }
 
 export interface AuthSession {
-  token: string;
   expiresAt: string;
 }
 

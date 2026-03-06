@@ -9,6 +9,7 @@ A full-stack app for generating grounded news/text answers with Gemini, converti
 - Stores prompt history locally for manual runs
 - Supports admin login, schedules, run history, and Cloud Scheduler polling
 - Stores scheduled run artifacts in Google Cloud Storage
+- Prefetches scheduled audio into local IndexedDB cache for reuse after refresh
 
 ## Stack
 
@@ -59,8 +60,42 @@ Infrastructure used by the deployed app:
 
 - Cloud Run for the web app and API
 - Firestore for schedules and run metadata
+- Firestore for global daily rate-limit counters
 - Cloud Storage for generated JSON and WAV artifacts
 - Cloud Scheduler for polling due schedules
+
+## Security
+
+The current codebase includes these protections:
+
+- Admin login uses signed `HttpOnly` cookie sessions
+- State-changing browser requests are protected by same-origin `Origin`/`Referer` checks
+- Scheduled artifacts are served only to authenticated admin sessions
+- Artifact path traversal is blocked in the storage layer
+- Global daily limits are enforced in Firestore:
+  - login: `100/day`
+  - text generation: `200/day`
+  - tts generation: `200/day`
+
+Important runtime env vars for production:
+
+- `ADMIN_SESSION_SECRET`
+- `SCHEDULER_SHARED_SECRET`
+- `ALLOWED_ORIGINS`
+- `FIRESTORE_COLLECTION_RATE_LIMITS`
+
+## Player Behavior
+
+The unified player supports both manual results and successful scheduled runs.
+
+- Scheduled audio prefetch runs top-down, one item at a time
+- Each scheduled item shows a cache state:
+  - `Queued`
+  - `Downloading audio...`
+  - `Decoding audio...`
+  - `Cached locally`
+  - `Failed`
+- Cached scheduled audio and text survive refresh until local session data is cleared
 
 ## Repository Notes
 

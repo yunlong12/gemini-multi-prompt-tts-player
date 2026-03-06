@@ -4,14 +4,15 @@ import { PlayCircle, MessageSquarePlus, Settings2 } from 'lucide-react';
 interface InputSectionProps {
   onProcess: (prompts: string[], ttsModel: string) => void;
   isProcessing: boolean;
+  warningMessage?: string;
 }
 
-export const InputSection: React.FC<InputSectionProps> = ({ onProcess, isProcessing }) => {
+export const InputSection: React.FC<InputSectionProps> = ({ onProcess, isProcessing, warningMessage }) => {
   const [inputText, setInputText] = useState('');
   const [selectedModel, setSelectedModel] = useState('gemini-2.5-pro-preview-tts');
 
   const handleProcess = () => {
-    if (!inputText.trim()) return;
+    if (!inputText.trim() || warningMessage) return;
     const prompts = inputText
       .split('\n')
       .map(line => line.trim())
@@ -47,6 +48,11 @@ export const InputSection: React.FC<InputSectionProps> = ({ onProcess, isProcess
       <p className="text-sm text-slate-400 mb-2">
         Enter multiple prompts (one per line). Each will be processed individually.
       </p>
+      {warningMessage && (
+        <div className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+          {warningMessage}
+        </div>
+      )}
       <textarea
         className="w-full h-40 bg-slate-900 border border-slate-700 rounded-lg p-4 text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm resize-none"
         placeholder={`Who won the 2024 Super Bowl?
@@ -61,7 +67,7 @@ Tell me a joke about a cat.`}
           disabled={!inputText.trim()}
           className={`
             flex items-center gap-2 px-6 py-3 rounded-lg font-bold transition-all
-            ${!inputText.trim()
+            ${!inputText.trim() || warningMessage
               ? 'bg-slate-700 text-slate-500 cursor-not-allowed'
               : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg hover:shadow-blue-500/30 active:scale-95'
             }

@@ -12,8 +12,28 @@ export interface PersistedItem {
   timestamp: number;
 }
 
+export interface PersistedScheduledRun {
+  id: string;
+  scheduleId: string;
+  startedAt: string;
+  finishedAt?: string;
+  status: 'running' | 'success' | 'error';
+  triggeredBy: 'manual' | 'scheduler';
+  resolvedPrompt: string;
+  generatedText?: string;
+  groundingLinks: GroundingUrl[];
+  audioPath?: string;
+  textPath?: string;
+  audioDownloadUrl?: string;
+  errorMessage?: string;
+  audioWavBase64?: string;
+  cacheStatus?: 'queued' | 'downloading' | 'decoding' | 'cached' | 'failed';
+  cacheError?: string;
+}
+
 export interface PersistedState {
   items: PersistedItem[];
+  scheduledRuns: PersistedScheduledRun[];
   recentPrompts: string[];
   updatedAt: number;
 }

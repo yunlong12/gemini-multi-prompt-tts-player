@@ -8,6 +8,17 @@ export const base64ToUint8Array = (base64: string): Uint8Array => {
   return bytes;
 };
 
+export const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return window.btoa(binary);
+};
+
 // Decodes raw PCM audio data manually
 // Gemini TTS returns raw PCM 16-bit, 24kHz, Mono
 export const decodeAudioData = async (

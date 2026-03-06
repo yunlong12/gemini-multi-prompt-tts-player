@@ -21,7 +21,7 @@ const useFirestore = !process.env.DISABLE_FIRESTORE;
 
 let firestore = null;
 
-function getFirestore() {
+export function getFirestore() {
   if (!useFirestore) {
     logWarn('scheduleStore', 'firestore.disabled_by_env');
     return null;

@@ -44,20 +44,44 @@ function buildObjectPath({ scheduleId, runId, startedAt, outputPrefix, extension
   return `${outputPrefix}/${scheduleId}/${dateParts.year}/${dateParts.month}/${dateParts.day}/${runId}.${extension}`;
 }
 
+function sanitizeObjectPath(objectPath) {
+  const rawPath = String(objectPath || '').trim().replace(/\\/g, '/');
+  if (!rawPath || rawPath.includes('\0')) {
+    throw new Error('Invalid artifact path.');
+  }
+
+  const normalizedPath = path.posix.normalize(rawPath).replace(/^\/+/, '');
+  if (!normalizedPath || normalizedPath === '.' || normalizedPath.startsWith('..')) {
+    throw new Error('Invalid artifact path.');
+  }
+
+  const segments = normalizedPath.split('/').filter(Boolean);
+  if (!segments.length || segments.some((segment) => segment === '.' || segment === '..')) {
+    throw new Error('Invalid artifact path.');
+  }
+
+  return segments.join('/');
+}
+
 async function ensureLocalResultDir(objectPath) {
-  const fullPath = path.join(localResultDir, objectPath);
+  const safeObjectPath = sanitizeObjectPath(objectPath);
+  const fullPath = path.resolve(localResultDir, safeObjectPath);
+  const relativePath = path.relative(localResultDir, fullPath);
+  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    throw new Error('Invalid artifact path.');
+  }
   await fs.mkdir(path.dirname(fullPath), { recursive: true });
   return fullPath;
 }
 
 export async function saveAudio({ scheduleId, runId, startedAt, outputPrefix, wavBuffer }) {
-  const objectPath = buildObjectPath({
+  const objectPath = sanitizeObjectPath(buildObjectPath({
     scheduleId,
     runId,
     startedAt,
     outputPrefix,
     extension: 'wav',
-  });
+  }));
   const cloudStorage = getStorage();
 
   if (cloudStorage) {
@@ -85,13 +109,13 @@ export async function saveAudio({ scheduleId, runId, startedAt, outputPrefix, wa
 }
 
 export async function saveTextArtifact({ scheduleId, runId, startedAt, outputPrefix, payload }) {
-  const objectPath = buildObjectPath({
+  const objectPath = sanitizeObjectPath(buildObjectPath({
     scheduleId,
     runId,
     startedAt,
     outputPrefix,
     extension: 'json',
-  });
+  }));
   const body = JSON.stringify(payload, null, 2);
   const cloudStorage = getStorage();
 
@@ -113,7 +137,7 @@ export async function saveTextArtifact({ scheduleId, runId, startedAt, outputPre
 }
 
 export async function readArtifact(objectPath) {
-  const safePath = String(objectPath || '').replace(/^\.+/, '');
+  const safePath = sanitizeObjectPath(objectPath);
   const cloudStorage = getStorage();
 
   if (cloudStorage) {
