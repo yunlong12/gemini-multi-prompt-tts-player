@@ -151,3 +151,19 @@ export async function readArtifact(objectPath) {
   logWarn('resultStore', 'readArtifact.local_fallback', { objectPath: safePath, bytes: buffer.length });
   return buffer;
 }
+
+export async function deleteArtifact(objectPath) {
+  const safePath = sanitizeObjectPath(objectPath);
+  const cloudStorage = getStorage();
+
+  if (cloudStorage) {
+    const bucket = cloudStorage.bucket(bucketName);
+    await bucket.file(safePath).delete({ ignoreNotFound: true });
+    logInfo('resultStore', 'deleteArtifact.gcs', { objectPath: safePath });
+    return true;
+  }
+
+  await fs.rm(path.join(localResultDir, safePath), { force: true });
+  logWarn('resultStore', 'deleteArtifact.local_fallback', { objectPath: safePath });
+  return true;
+}

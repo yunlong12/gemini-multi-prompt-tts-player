@@ -422,3 +422,26 @@ export async function getRun(id) {
   logWarn('scheduleStore', 'getRun.local_fallback', { id });
   return payload.runs.find((run) => run.id === id) || null;
 }
+
+export async function deleteRun(id) {
+  const db = getFirestore();
+  if (db) {
+    const docRef = db.collection(runsCollection).doc(id);
+    const doc = await docRef.get();
+    if (!doc.exists) {
+      logInfo('scheduleStore', 'deleteRun.firestore.missing', { id });
+      return false;
+    }
+
+    await docRef.delete();
+    logInfo('scheduleStore', 'deleteRun.firestore', { id });
+    return true;
+  }
+
+  const payload = await readLocalDb();
+  const originalCount = payload.runs.length;
+  payload.runs = payload.runs.filter((run) => run.id !== id);
+  await writeLocalDb(payload);
+  logWarn('scheduleStore', 'deleteRun.local_fallback', { id, deleted: payload.runs.length !== originalCount });
+  return payload.runs.length !== originalCount;
+}

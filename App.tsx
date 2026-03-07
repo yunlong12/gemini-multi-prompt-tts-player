@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import { AlertTriangle, CalendarClock, ListMusic, PlayCircle, RotateCcw, Terminal, Trash2 } from 'lucide-react';
+import { AlertTriangle, CalendarClock, CheckSquare, ListMusic, PlayCircle, Square, Terminal, Trash2 } from 'lucide-react';
 import { InputSection } from './components/InputSection';
 import { LoginForm } from './components/LoginForm';
 import { ResultCard } from './components/ResultCard';
@@ -10,6 +10,7 @@ import { ScheduleList } from './components/ScheduleList';
 import { UnifiedPlayer } from './components/UnifiedPlayer';
 import {
   createSchedule as createScheduleApi,
+  deleteRun as deleteRunApi,
   deleteSchedule as deleteScheduleApi,
   fetchAuthSession,
   fetchRuns,
@@ -23,7 +24,7 @@ import {
 } from './services/adminApi';
 import { generateSpeech, generateTextAnswer } from './services/geminiService';
 import { AuthSession, ItemStatus, ProcessItem, Schedule, SchedulerConfig, ScheduleRun } from './types';
-import { decodeAudioData } from './utils/audioUtils';
+import { arrayBufferToBase64, base64ToUint8Array, decodeAudioData } from './utils/audioUtils';
 import { clearPersistedState, loadPersistedState, PersistedScheduledRun, PersistedState, savePersistedState } from './utils/storage';
 
 const ONE_HOUR_MS = 3600000;
@@ -31,6 +32,7 @@ const DEFAULT_TTS_MODEL = 'gemini-2.5-pro-preview-tts';
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const POLLING_PRESETS = [1, 5, 10, 15, 30, 60];
 type RateLimitScope = 'login' | 'text' | 'tts';
+type ScheduledAudioLoadState = 'idle' | 'queued' | 'downloading' | 'decoding' | 'cached' | 'error';
 
 const cronToMinutes = (cron: string): number | null => {
   const normalized = String(cron || '').trim();
@@ -48,6 +50,22 @@ const minutesToCron = (minutes: number): string => {
   const safeMinutes = Math.max(1, Math.min(60, Math.floor(minutes)));
   return safeMinutes === 60 ? '0 * * * *' : `*/${safeMinutes} * * * *`;
 };
+
+const getLocalDateKey = (timestamp: number) => {
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const formatHistoryDateLabel = (timestamp: number) =>
+  new Date(timestamp).toLocaleDateString(undefined, {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
 
 const App: React.FC = () => {
   const [items, setItems] = useState<ProcessItem[]>([]);
@@ -70,6 +88,10 @@ const App: React.FC = () => {
   const [schedulerTimezoneDraft, setSchedulerTimezoneDraft] = useState('Europe/Paris');
   const [isSchedulerSaving, setIsSchedulerSaving] = useState(false);
   const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null);
+  const [selectedHistoryEntryIds, setSelectedHistoryEntryIds] = useState<Set<string>>(new Set());
+  const [scheduledAudioBuffersById, setScheduledAudioBuffersById] = useState<Record<string, AudioBuffer>>({});
+  const [scheduledAudioLoadStateById, setScheduledAudioLoadStateById] = useState<Record<string, ScheduledAudioLoadState>>({});
+  const [scheduledAudioErrorsById, setScheduledAudioErrorsById] = useState<Record<string, string>>({});
   const [rateLimitWarnings, setRateLimitWarnings] = useState<Record<RateLimitScope, string>>({
     login: '',
     text: '',
@@ -81,6 +103,11 @@ const App: React.FC = () => {
   const audioContextRef = useRef<AudioContext | null>(null);
   const itemsRef = useRef<ProcessItem[]>([]);
   const logsEndRef = useRef<HTMLDivElement>(null);
+  const scheduledAudioLoadPromisesRef = useRef<Record<string, Promise<AudioBuffer | null>>>({});
+  const scheduledAudioHydrationRef = useRef<Record<string, Promise<void>>>({});
+  const scheduledPrefetchedIdsRef = useRef<Record<string, boolean>>({});
+  const scheduledPrefetchRunningRef = useRef(false);
+  const scheduledPrefetchCycleRef = useRef(0);
 
   const addLog = (msg: string) => setLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
   const isAdminAuthenticated = Boolean(authSession);
@@ -94,6 +121,23 @@ const App: React.FC = () => {
   const activeRateLimitWarnings = (Object.entries(rateLimitWarnings) as [RateLimitScope, string][])
     .filter(([, message]) => Boolean(message));
   const generationWarningMessage = [rateLimitWarnings.text, rateLimitWarnings.tts].filter(Boolean).join(' ');
+  const historyGroupCheckboxRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const updateHistorySelection = (entryId: string, checked: boolean) =>
+    setSelectedHistoryEntryIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(entryId);
+      else next.delete(entryId);
+      return next;
+    });
+  const setHistoryDateSelection = (entryIds: string[], checked: boolean) =>
+    setSelectedHistoryEntryIds((prev) => {
+      const next = new Set(prev);
+      entryIds.forEach((entryId) => {
+        if (checked) next.add(entryId);
+        else next.delete(entryId);
+      });
+      return next;
+    });
 
   const clearAdminSession = () => {
     addLog('[Auth] Clearing admin session and cached admin data.');
@@ -104,6 +148,30 @@ const App: React.FC = () => {
     setSchedulerIntervalMinutesDraft(5);
     setSchedulerTimezoneDraft('Europe/Paris');
     setEditingSchedule(null);
+  };
+  const clearScheduledAudioState = (runId: string) => {
+    const playerItemId = `scheduled:${runId}`;
+    setScheduledAudioBuffersById((prev) => {
+      if (!prev[playerItemId]) return prev;
+      const next = { ...prev };
+      delete next[playerItemId];
+      return next;
+    });
+    setScheduledAudioLoadStateById((prev) => {
+      if (!prev[playerItemId]) return prev;
+      const next = { ...prev };
+      delete next[playerItemId];
+      return next;
+    });
+    setScheduledAudioErrorsById((prev) => {
+      if (!prev[playerItemId]) return prev;
+      const next = { ...prev };
+      delete next[playerItemId];
+      return next;
+    });
+    delete scheduledAudioLoadPromisesRef.current[playerItemId];
+    delete scheduledAudioHydrationRef.current[playerItemId];
+    delete scheduledPrefetchedIdsRef.current[playerItemId];
   };
 
   const refreshAdminData = async () => {
@@ -228,6 +296,193 @@ const App: React.FC = () => {
     }
     return audioContextRef.current;
   };
+  const loadScheduledRunAudio = async (runId: string): Promise<AudioBuffer | null> => {
+    const playerItemId = `scheduled:${runId}`;
+    const matchingRun = runs.find((run) => run.id === runId) || persistedScheduledRuns[runId];
+    const audioPath = 'audioPath' in (matchingRun || {}) ? matchingRun?.audioPath : undefined;
+    if (!audioPath) {
+      return null;
+    }
+    if (scheduledAudioBuffersById[playerItemId]) {
+      return scheduledAudioBuffersById[playerItemId];
+    }
+    if (scheduledAudioLoadPromisesRef.current[playerItemId]) {
+      return scheduledAudioLoadPromisesRef.current[playerItemId];
+    }
+
+    const promise = (async () => {
+      try {
+        addLog(`[Player] Loading scheduled audio for ${playerItemId.slice(0, 12)}.`);
+        setScheduledAudioLoadStateById((prev) => ({ ...prev, [playerItemId]: 'downloading' }));
+        setScheduledAudioErrorsById((prev) => {
+          const next = { ...prev };
+          delete next[playerItemId];
+          return next;
+        });
+        setPersistedScheduledRuns((prev) => ({
+          ...prev,
+          [runId]: {
+            ...prev[runId],
+            ...(matchingRun || {}),
+            cacheStatus: 'downloading',
+            cacheError: '',
+          },
+        }));
+        const response = await fetch(`/api/artifacts/${encodeURIComponent(audioPath)}`);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const arrayBuffer = await response.arrayBuffer();
+        setScheduledAudioLoadStateById((prev) => ({ ...prev, [playerItemId]: 'decoding' }));
+        setPersistedScheduledRuns((prev) => ({
+          ...prev,
+          [runId]: {
+            ...prev[runId],
+            ...(matchingRun || {}),
+            cacheStatus: 'decoding',
+            cacheError: '',
+          },
+        }));
+        const audioWavBase64 = arrayBufferToBase64(arrayBuffer);
+        const decoded = await getAudioContext().decodeAudioData(arrayBuffer.slice(0));
+        setScheduledAudioBuffersById((prev) => ({ ...prev, [playerItemId]: decoded }));
+        setScheduledAudioLoadStateById((prev) => ({ ...prev, [playerItemId]: 'cached' }));
+        setPersistedScheduledRuns((prev) => ({
+          ...prev,
+          [runId]: {
+            ...prev[runId],
+            ...(matchingRun || {}),
+            audioWavBase64,
+            cacheStatus: 'cached',
+            cacheError: '',
+          },
+        }));
+        addLog(`[Player] Scheduled audio ready (${decoded.duration.toFixed(2)}s).`);
+        return decoded;
+      } catch (error: any) {
+        const message = error?.message || 'Failed to load scheduled audio';
+        setScheduledAudioLoadStateById((prev) => ({ ...prev, [playerItemId]: 'error' }));
+        setScheduledAudioErrorsById((prev) => ({ ...prev, [playerItemId]: message }));
+        setPersistedScheduledRuns((prev) => ({
+          ...prev,
+          [runId]: {
+            ...prev[runId],
+            ...(matchingRun || {}),
+            cacheStatus: 'failed',
+            cacheError: message,
+          },
+        }));
+        addLog(`[Player] Scheduled audio load failed: ${message}`);
+        return null;
+      } finally {
+        delete scheduledAudioLoadPromisesRef.current[playerItemId];
+      }
+    })();
+
+    scheduledAudioLoadPromisesRef.current[playerItemId] = promise;
+    return promise;
+  };
+
+  useEffect(() => {
+    const hydratePersistedAudio = async (runId: string, persistedRun: PersistedScheduledRun) => {
+      const playerItemId = `scheduled:${runId}`;
+      if (!persistedRun.audioWavBase64 || scheduledAudioBuffersById[playerItemId]) {
+        return;
+      }
+      if (scheduledAudioHydrationRef.current[playerItemId]) {
+        return scheduledAudioHydrationRef.current[playerItemId];
+      }
+
+      const promise = (async () => {
+        try {
+          setScheduledAudioLoadStateById((prev) => ({ ...prev, [playerItemId]: 'decoding' }));
+          const bytes = base64ToUint8Array(persistedRun.audioWavBase64!);
+          const decoded = await getAudioContext().decodeAudioData(bytes.buffer.slice(0));
+          setScheduledAudioBuffersById((prev) => ({ ...prev, [playerItemId]: decoded }));
+          setScheduledAudioLoadStateById((prev) => ({ ...prev, [playerItemId]: 'cached' }));
+          setPersistedScheduledRuns((prev) => ({
+            ...prev,
+            [runId]: {
+              ...prev[runId],
+              cacheStatus: 'cached',
+              cacheError: '',
+            },
+          }));
+          addLog(`[Player] Restored scheduled audio from local cache for ${playerItemId.slice(0, 12)}.`);
+        } catch (error: any) {
+          setScheduledAudioLoadStateById((prev) => ({ ...prev, [playerItemId]: 'error' }));
+          setScheduledAudioErrorsById((prev) => ({ ...prev, [playerItemId]: error?.message || 'Failed to restore cached audio' }));
+          setPersistedScheduledRuns((prev) => ({
+            ...prev,
+            [runId]: {
+              ...prev[runId],
+              cacheStatus: 'failed',
+              cacheError: error?.message || 'Failed to restore cached audio',
+            },
+          }));
+        } finally {
+          delete scheduledAudioHydrationRef.current[playerItemId];
+        }
+      })();
+
+      scheduledAudioHydrationRef.current[playerItemId] = promise;
+      return promise;
+    };
+
+    for (const run of runs) {
+      if (run.status !== 'success' || !run.audioPath) {
+        continue;
+      }
+      const persistedRun = persistedScheduledRuns[run.id];
+      if (persistedRun?.audioWavBase64) {
+        void hydratePersistedAudio(run.id, persistedRun);
+      }
+    }
+  }, [runs, persistedScheduledRuns, scheduledAudioBuffersById]);
+
+  useEffect(() => {
+    const scheduledRunsWithAudio = runs.filter((run) => run.status === 'success' && Boolean(run.audioPath));
+    if (!scheduledRunsWithAudio.length) {
+      return;
+    }
+
+    const missingRuns = scheduledRunsWithAudio.filter((run) => {
+      const playerItemId = `scheduled:${run.id}`;
+      const persistedRun = persistedScheduledRuns[run.id];
+      return !persistedRun?.audioWavBase64 && !scheduledPrefetchedIdsRef.current[playerItemId];
+    });
+
+    if (!missingRuns.length || scheduledPrefetchRunningRef.current) {
+      return;
+    }
+
+    for (const run of missingRuns) {
+      const playerItemId = `scheduled:${run.id}`;
+      setScheduledAudioLoadStateById((prev) => (prev[playerItemId] ? prev : { ...prev, [playerItemId]: 'queued' }));
+      setPersistedScheduledRuns((prev) => ({
+        ...prev,
+        [run.id]: {
+          ...prev[run.id],
+          ...run,
+          cacheStatus: prev[run.id]?.audioWavBase64 ? 'cached' : prev[run.id]?.cacheStatus || 'queued',
+          cacheError: prev[run.id]?.cacheError || '',
+        },
+      }));
+    }
+
+    scheduledPrefetchRunningRef.current = true;
+    scheduledPrefetchCycleRef.current += 1;
+    addLog(`[Player] Prefetch queue started for ${missingRuns.length} scheduled audio item(s), top to bottom.`);
+    void (async () => {
+      for (const run of missingRuns) {
+        const playerItemId = `scheduled:${run.id}`;
+        scheduledPrefetchedIdsRef.current[playerItemId] = true;
+        await loadScheduledRunAudio(run.id);
+      }
+      addLog('[Player] Scheduled audio prefetch finished.');
+      scheduledPrefetchRunningRef.current = false;
+    })();
+  }, [runs, persistedScheduledRuns, scheduledAudioBuffersById]);
   const runQueueWorker = async () => {
     if (isWorkerRunningRef.current) return;
     isWorkerRunningRef.current = true;
@@ -409,6 +664,78 @@ const App: React.FC = () => {
       setIsSchedulerSaving(false);
     }
   };
+  const deleteScheduledHistoryItem = async (runId: string) => {
+    const target = persistedScheduledRuns[runId];
+    if (!target) {
+      return false;
+    }
+
+    if (!isAdminAuthenticated) {
+      const message = 'Admin login is required to delete scheduled history from Google Cloud.';
+      setAdminError(message);
+      addLog(`[History] ${message}`);
+      setActiveTab('schedules');
+      return false;
+    }
+
+    addLog(`[History] Deleting scheduled run "${target.resolvedPrompt}" (${runId}) from cloud and local cache.`);
+    setAdminError('');
+    try {
+      await deleteRunApi(runId);
+      if (playerAutoplayRequestId === `scheduled:${runId}`) {
+        setPlayerAutoplayRequestId(null);
+      }
+      clearScheduledAudioState(runId);
+      setPersistedScheduledRuns((prev) => {
+        const next = { ...prev };
+        delete next[runId];
+        return next;
+      });
+      setRuns((prev) => prev.filter((run) => run.id !== runId));
+      addLog(`[History] Deleted scheduled run "${target.resolvedPrompt}" from cloud and local cache.`);
+      return true;
+    } catch (error: any) {
+      addLog(`[History] Failed to delete scheduled run "${target.resolvedPrompt}": ${error?.message || error}`);
+      if (isUnauthorizedError(error)) {
+        clearAdminSession();
+      }
+      setAdminError(error?.message || 'Failed to delete scheduled run');
+      return false;
+    }
+  };
+  const handleScheduledHistoryDelete = async (runId: string) => {
+    const target = persistedScheduledRuns[runId];
+    if (!target || !window.confirm(`Delete scheduled history "${target.resolvedPrompt.substring(0, 30)}..." from cloud and local cache?`)) {
+      return;
+    }
+
+    await deleteScheduledHistoryItem(runId);
+  };
+  const deleteManualHistoryItem = async (itemId: string) => {
+    const target = itemsRef.current.find((entry) => entry.id === itemId);
+    if (!target) {
+      return false;
+    }
+
+    processingQueueRef.current = processingQueueRef.current.filter((queueId) => queueId !== itemId);
+    if (selectedItemId === itemId) {
+      setSelectedItemId(null);
+    }
+    if (playerAutoplayRequestId === `manual:${itemId}`) {
+      setPlayerAutoplayRequestId(null);
+    }
+    setItems((prev) => prev.filter((entry) => entry.id !== itemId));
+    addLog(`[History] Deleted manual item "${target.prompt}".`);
+    return true;
+  };
+  const handleManualHistoryDelete = async (itemId: string) => {
+    const target = itemsRef.current.find((entry) => entry.id === itemId);
+    if (!target || !window.confirm(`Delete "${target.prompt.substring(0, 30)}..."?`)) {
+      return;
+    }
+
+    await deleteManualHistoryItem(itemId);
+  };
 
   const resetAll = () => {
     addLog('[UI] Clearing full session state (results/logs/player queue).');
@@ -420,6 +747,14 @@ const App: React.FC = () => {
     setLogs([]);
     setSelectedItemId(null);
     setPlayerAutoplayRequestId(null);
+    setSelectedHistoryEntryIds(new Set());
+    setScheduledAudioBuffersById({});
+    setScheduledAudioLoadStateById({});
+    setScheduledAudioErrorsById({});
+    scheduledAudioLoadPromisesRef.current = {};
+    scheduledAudioHydrationRef.current = {};
+    scheduledPrefetchedIdsRef.current = {};
+    scheduledPrefetchRunningRef.current = false;
     void clearPersistedState();
   };
   const resultsItems = items.filter((item) => Date.now() - item.timestamp < ONE_HOUR_MS);
@@ -428,6 +763,7 @@ const App: React.FC = () => {
     ...items.map((item) => ({
       id: `manual:${item.id}`,
       source: 'manual' as const,
+      targetId: item.id,
       timestamp: item.timestamp,
       title: item.prompt,
       body: item.answer || 'No answer',
@@ -440,22 +776,13 @@ const App: React.FC = () => {
         setActiveTab('player');
       },
       onDelete: () => {
-        const target = items.find((entry) => entry.id === item.id);
-        if (!target || !window.confirm(`Delete "${target.prompt.substring(0, 30)}..."?`)) return;
-        processingQueueRef.current = processingQueueRef.current.filter((queueId) => queueId !== item.id);
-        if (selectedItemId === item.id) {
-          setSelectedItemId(null);
-        }
-        if (playerAutoplayRequestId === `manual:${item.id}`) {
-          setPlayerAutoplayRequestId(null);
-        }
-        setItems((prev) => prev.filter((entry) => entry.id !== item.id));
-        addLog(`[History] Deleted manual item "${target.prompt}".`);
+        void handleManualHistoryDelete(item.id);
       },
     })),
     ...persistedScheduledHistory.map((run) => ({
       id: `scheduled:${run.id}`,
       source: 'scheduled' as const,
+      targetId: run.id,
       timestamp: new Date(run.startedAt).getTime(),
       title: run.resolvedPrompt,
       body: run.generatedText || run.errorMessage || 'No text available',
@@ -467,20 +794,108 @@ const App: React.FC = () => {
         setActiveTab('player');
       },
       onDelete: () => {
-        const target = persistedScheduledRuns[run.id];
-        if (!target || !window.confirm(`Delete scheduled history "${target.resolvedPrompt.substring(0, 30)}..."?`)) return;
-        if (playerAutoplayRequestId === `scheduled:${run.id}`) {
-          setPlayerAutoplayRequestId(null);
-        }
-        setPersistedScheduledRuns((prev) => {
-          const next = { ...prev };
-          delete next[run.id];
-          return next;
-        });
-        addLog(`[History] Deleted scheduled history "${target.resolvedPrompt}".`);
+        void handleScheduledHistoryDelete(run.id);
       },
     })),
   ].sort((a, b) => b.timestamp - a.timestamp);
+  const historyGroups = historyEntries.reduce<Array<{
+    key: string;
+    label: string;
+    timestamp: number;
+    entries: typeof historyEntries;
+  }>>((groups, entry) => {
+    const key = getLocalDateKey(entry.timestamp);
+    const existingGroup = groups[groups.length - 1];
+    if (existingGroup && existingGroup.key === key) {
+      existingGroup.entries.push(entry);
+      return groups;
+    }
+
+    groups.push({
+      key,
+      label: formatHistoryDateLabel(entry.timestamp),
+      timestamp: entry.timestamp,
+      entries: [entry],
+    });
+    return groups;
+  }, []);
+  const selectedHistoryEntries = historyEntries.filter((entry) => selectedHistoryEntryIds.has(entry.id));
+  const hasSelectedScheduledEntries = selectedHistoryEntries.some((entry) => entry.source === 'scheduled');
+  const hasSelectedHistoryEntries = selectedHistoryEntries.length > 0;
+  const handleBulkDeleteHistory = async () => {
+    if (!hasSelectedHistoryEntries) {
+      return;
+    }
+
+    if (hasSelectedScheduledEntries && !isAdminAuthenticated) {
+      const message = 'Admin login is required to delete scheduled history from Google Cloud.';
+      setAdminError(message);
+      addLog(`[History] ${message}`);
+      setActiveTab('schedules');
+      return;
+    }
+
+    const confirmMessage = hasSelectedScheduledEntries
+      ? `Delete ${selectedHistoryEntries.length} selected history item(s)? Scheduled items will be deleted from Google Cloud and local cache.`
+      : `Delete ${selectedHistoryEntries.length} selected history item(s)?`;
+    if (!window.confirm(confirmMessage)) {
+      return;
+    }
+
+    let successCount = 0;
+    let failureCount = 0;
+    const failedIds = new Set<string>();
+    setAdminError('');
+
+    for (const entry of selectedHistoryEntries) {
+      try {
+        if (entry.source === 'manual') {
+          const deleted = await deleteManualHistoryItem(entry.targetId);
+          if (!deleted) {
+            failureCount += 1;
+            failedIds.add(entry.id);
+            continue;
+          }
+        } else {
+          const deleted = await deleteScheduledHistoryItem(entry.targetId);
+          if (!deleted) {
+            failureCount += 1;
+            failedIds.add(entry.id);
+            continue;
+          }
+        }
+
+        successCount += 1;
+      } catch (_error) {
+        failureCount += 1;
+        failedIds.add(entry.id);
+      }
+    }
+
+    setSelectedHistoryEntryIds(failedIds);
+    addLog(`[History] Bulk delete finished. Success=${successCount}, Failed=${failureCount}.`);
+  };
+  useEffect(() => {
+    setSelectedHistoryEntryIds((prev) => {
+      if (prev.size === 0) {
+        return prev;
+      }
+
+      const validIds = new Set(historyEntries.map((entry) => entry.id));
+      const next = new Set(Array.from(prev).filter((id) => validIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [historyEntries]);
+  useEffect(() => {
+    historyGroups.forEach((group) => {
+      const checkbox = historyGroupCheckboxRefs.current[group.key];
+      if (!checkbox) {
+        return;
+      }
+      const selectedCount = group.entries.filter((entry) => selectedHistoryEntryIds.has(entry.id)).length;
+      checkbox.indeterminate = selectedCount > 0 && selectedCount < group.entries.length;
+    });
+  }, [historyGroups, selectedHistoryEntryIds]);
   const adminPanel = !isAdminAuthenticated
     ? <LoginForm onLogin={handleAdminLogin} isLoading={isAuthLoading} />
     : <>
@@ -598,16 +1013,6 @@ const App: React.FC = () => {
           ))}
         </div>
 
-        {!isProcessingActive && (items.length > 0 || persistedScheduledHistory.length > 0) && (
-          <button
-            onClick={resetAll}
-            className="inline-flex items-center justify-center gap-2 self-start rounded-full border border-red-900/40 bg-red-950/20 px-4 py-2 text-sm font-medium text-red-200 transition-colors hover:bg-red-950/35 hover:text-red-100 lg:self-auto"
-            title="Clear local results, logs, queue, and cached player state"
-          >
-            <RotateCcw size={16} />
-            <span>Clear Session</span>
-          </button>
-        )}
       </div>
 
       {activeTab === 'results' && <>
@@ -631,20 +1036,89 @@ const App: React.FC = () => {
           items={items}
           runs={runs}
           persistedScheduledRuns={persistedScheduledRuns}
-          setPersistedScheduledRuns={setPersistedScheduledRuns}
           setItems={setItems}
           setSelectedItemId={setSelectedItemId}
           addLog={addLog}
           autoplayRequestId={playerAutoplayRequestId}
           onAutoplayRequestHandled={() => setPlayerAutoplayRequestId(null)}
+          scheduledAudioBuffersById={scheduledAudioBuffersById}
+          scheduledAudioLoadStateById={scheduledAudioLoadStateById}
+          scheduledAudioErrorsById={scheduledAudioErrorsById}
+          loadScheduledRunAudio={loadScheduledRunAudio}
         />
       )}
 
       {activeTab === 'history' && <div className="bg-slate-900 rounded-lg border border-slate-800 p-4 mb-10 space-y-4">
         <div className="flex flex-wrap items-center gap-3 justify-between border-b border-slate-800 pb-4"><div className="flex items-center gap-2 text-slate-200 font-semibold"><ListMusic size={18} /> History (Stored in IndexedDB)</div><div className="text-xs text-slate-500 italic">Manual items and locally cached scheduled runs are stored here.</div></div>
+        {historyEntries.length > 0 && (
+          <div className="flex flex-col gap-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3 md:flex-row md:items-center md:justify-between">
+            <div className="text-sm text-slate-300">
+              Selected: <span className="font-semibold text-white">{selectedHistoryEntries.length}</span> / {historyEntries.length}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => setSelectedHistoryEntryIds(new Set(historyEntries.map((entry) => entry.id)))}
+                className="inline-flex items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700"
+              >
+                <CheckSquare size={15} />
+                Select All
+              </button>
+              <button
+                onClick={() => setSelectedHistoryEntryIds(new Set())}
+                disabled={!hasSelectedHistoryEntries}
+                className={`inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium ${
+                  hasSelectedHistoryEntries
+                    ? 'border-slate-700 bg-slate-800 text-slate-200 hover:bg-slate-700'
+                    : 'border-slate-800 bg-slate-900 text-slate-500 cursor-not-allowed'
+                }`}
+              >
+                <Square size={15} />
+                Clear Selection
+              </button>
+              <button
+                onClick={() => void handleBulkDeleteHistory()}
+                disabled={!hasSelectedHistoryEntries}
+                className={`inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm font-semibold ${
+                  hasSelectedHistoryEntries
+                    ? 'border-red-900/30 bg-red-900/20 text-red-300 hover:bg-red-900/35'
+                    : 'border-slate-800 bg-slate-900 text-slate-500 cursor-not-allowed'
+                }`}
+              >
+                <Trash2 size={15} />
+                Delete Selected
+              </button>
+            </div>
+          </div>
+        )}
         {!historyEntries.length && <div className="text-center py-10 text-slate-600 italic">No history items yet.</div>}
         <div className="space-y-3 max-h-[520px] overflow-y-auto pr-1">
-          {historyEntries.map((entry) => <div key={entry.id} className={`rounded-lg border p-4 flex flex-col gap-2 ${entry.isActive ? 'border-emerald-500/60 bg-emerald-500/10' : 'border-slate-800 bg-slate-800/40'}`}><div className="flex justify-between items-start gap-4"><div className="min-w-0 flex-1"><div className="flex items-center gap-2 mb-1"><div className="text-xs text-slate-500">{new Date(entry.timestamp).toLocaleString()}</div><span className={`text-[10px] uppercase tracking-wide px-2 py-1 rounded-full ${entry.source === 'manual' ? 'bg-blue-950/40 text-blue-300 border border-blue-900/40' : 'bg-emerald-950/40 text-emerald-300 border border-emerald-900/40'}`}>{entry.source}</span></div><div className="text-sm font-bold text-slate-100 break-words mb-1">{entry.title}</div><div className="text-xs text-slate-400 line-clamp-3">{entry.body}</div></div><div className="flex flex-col gap-2 shrink-0 w-32"><button onClick={entry.onPlay} disabled={!entry.playable} className={`px-3 py-2 rounded-md text-sm font-semibold flex items-center gap-2 justify-center ${entry.playable ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-slate-800 text-slate-500 cursor-not-allowed'}`}><PlayCircle size={16} /> Play</button><button onClick={entry.onDelete} className="px-3 py-2 rounded-md text-sm font-semibold bg-red-900/20 text-red-400 hover:bg-red-900/40 border border-red-900/30 flex items-center gap-2 justify-center"><Trash2 size={16} /> Delete</button></div></div></div>)}
+          {historyGroups.map((group) => {
+            const selectedCount = group.entries.filter((entry) => selectedHistoryEntryIds.has(entry.id)).length;
+            const allSelected = group.entries.length > 0 && selectedCount === group.entries.length;
+            return (
+              <div key={group.key} className="space-y-3">
+                <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/50 px-4 py-3">
+                  <div className="flex items-center gap-3">
+                    <input
+                      ref={(node) => {
+                        historyGroupCheckboxRefs.current[group.key] = node;
+                      }}
+                      type="checkbox"
+                      checked={allSelected}
+                      onChange={(event) => setHistoryDateSelection(group.entries.map((entry) => entry.id), event.target.checked)}
+                      className="h-4 w-4 rounded border-slate-600 bg-slate-950 text-emerald-500 focus:ring-emerald-500"
+                    />
+                    <div>
+                      <div className="text-sm font-semibold text-slate-100">{group.label}</div>
+                      <div className="text-xs text-slate-500">{group.entries.length} item(s)</div>
+                    </div>
+                  </div>
+                  <div className="text-xs text-slate-400">{selectedCount} selected</div>
+                </div>
+                {group.entries.map((entry) => <div key={entry.id} className={`rounded-lg border p-4 flex flex-col gap-2 ${entry.isActive ? 'border-emerald-500/60 bg-emerald-500/10' : 'border-slate-800 bg-slate-800/40'}`}><div className="flex justify-between items-start gap-4"><div className="flex min-w-0 flex-1 gap-3"><label className="mt-1 flex shrink-0 items-start"><input type="checkbox" checked={selectedHistoryEntryIds.has(entry.id)} onChange={(event) => updateHistorySelection(entry.id, event.target.checked)} className="h-4 w-4 rounded border-slate-600 bg-slate-950 text-emerald-500 focus:ring-emerald-500" /></label><div className="min-w-0 flex-1"><div className="flex items-center gap-2 mb-1"><div className="text-xs text-slate-500">{new Date(entry.timestamp).toLocaleString()}</div><span className={`text-[10px] uppercase tracking-wide px-2 py-1 rounded-full ${entry.source === 'manual' ? 'bg-blue-950/40 text-blue-300 border border-blue-900/40' : 'bg-emerald-950/40 text-emerald-300 border border-emerald-900/40'}`}>{entry.source}</span></div><div className="text-sm font-bold text-slate-100 break-words mb-1">{entry.title}</div><div className="text-xs text-slate-400 line-clamp-3">{entry.body}</div></div></div><div className="flex flex-col gap-2 shrink-0 w-32"><button onClick={entry.onPlay} disabled={!entry.playable} className={`px-3 py-2 rounded-md text-sm font-semibold flex items-center gap-2 justify-center ${entry.playable ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-slate-800 text-slate-500 cursor-not-allowed'}`}><PlayCircle size={16} /> Play</button><button onClick={entry.onDelete} className="px-3 py-2 rounded-md text-sm font-semibold bg-red-900/20 text-red-400 hover:bg-red-900/40 border border-red-900/30 flex items-center gap-2 justify-center"><Trash2 size={16} /> Delete</button></div></div></div>)}
+              </div>
+            );
+          })}
         </div>
       </div>}
 

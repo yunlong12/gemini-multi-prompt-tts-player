@@ -69,6 +69,7 @@ Infrastructure used by the deployed app:
 The current codebase includes these protections:
 
 - Admin login uses signed `HttpOnly` cookie sessions
+- Manual text generation and TTS endpoints require an authenticated admin session
 - State-changing browser requests are protected by same-origin `Origin`/`Referer` checks
 - Scheduled artifacts are served only to authenticated admin sessions
 - Artifact path traversal is blocked in the storage layer

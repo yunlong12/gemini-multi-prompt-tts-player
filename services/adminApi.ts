@@ -138,6 +138,12 @@ export async function fetchRuns(limit = 50): Promise<ScheduleRun[]> {
   return data.runs;
 }
 
+export async function deleteRun(id: string): Promise<void> {
+  await request<void>(`/api/runs/${id}`, {
+    method: 'DELETE',
+  });
+}
+
 export async function fetchSchedulerConfig(): Promise<SchedulerConfig> {
   const data = await request<{ config: SchedulerConfig }>('/api/scheduler/config');
   return data.config;

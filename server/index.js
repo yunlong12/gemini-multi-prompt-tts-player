@@ -9,6 +9,7 @@ import { createRateLimit } from './middleware/rateLimit.js';
 import { DEFAULT_TTS_MODEL, generateGroundedText, generateSpeechBase64 } from './services/gemini.js';
 import {
   createSchedule,
+  deleteRun,
   deleteSchedule,
   findDueSchedules,
   getRun,
@@ -18,7 +19,7 @@ import {
   listSchedules,
   updateSchedule,
 } from './services/scheduleStore.js';
-import { readArtifact } from './services/resultStore.js';
+import { deleteArtifact, readArtifact } from './services/resultStore.js';
 import { executeSchedule } from './services/scheduleRunner.js';
 import { getSchedulerConfig, updateSchedulerConfig } from './services/schedulerControl.js';
 import { logError, logInfo, logWarn, requestLogger } from './utils/logger.js';
@@ -139,7 +140,7 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/text', requireTrustedOrigin, textRateLimit, async (req, res) => {
+app.post('/api/text', requireAuth, requireTrustedOrigin, textRateLimit, async (req, res) => {
   try {
     const prompt = String(req.body?.prompt || '').trim();
     logInfo('api.text', 'generate.start', {
@@ -164,7 +165,7 @@ app.post('/api/text', requireTrustedOrigin, textRateLimit, async (req, res) => {
   }
 });
 
-app.post('/api/tts', requireTrustedOrigin, ttsRateLimit, async (req, res) => {
+app.post('/api/tts', requireAuth, requireTrustedOrigin, ttsRateLimit, async (req, res) => {
   try {
     const text = String(req.body?.text || '').trim();
     const model = String(req.body?.model || DEFAULT_TTS_MODEL).trim() || DEFAULT_TTS_MODEL;
@@ -349,6 +350,53 @@ app.get('/api/runs/:id', requireAuth, async (req, res) => {
   } catch (error) {
     logError('api.runs', 'get.error', { requestId: req.requestId, runId: req.params.id, error });
     return res.status(500).json({ message: error?.message || 'Failed to get run' });
+  }
+});
+
+app.delete('/api/runs/:id', requireAuth, requireTrustedOrigin, async (req, res) => {
+  try {
+    const run = await getRun(req.params.id);
+    if (!run) {
+      return res.status(404).json({ message: 'Run not found' });
+    }
+
+    const artifactErrors = [];
+
+    for (const artifactPath of [run.audioPath, run.textPath].filter(Boolean)) {
+      try {
+        await deleteArtifact(artifactPath);
+      } catch (error) {
+        artifactErrors.push({
+          artifactPath,
+          message: error?.message || 'Failed to delete artifact',
+        });
+      }
+    }
+
+    const deleted = await deleteRun(req.params.id);
+    if (!deleted) {
+      return res.status(404).json({ message: 'Run not found' });
+    }
+
+    if (artifactErrors.length > 0) {
+      logWarn('api.runs', 'delete.partial_artifact_failure', {
+        requestId: req.requestId,
+        runId: req.params.id,
+        artifactErrors,
+      });
+    }
+
+    logInfo('api.runs', 'delete.success', {
+      requestId: req.requestId,
+      runId: req.params.id,
+      audioPath: run.audioPath || null,
+      textPath: run.textPath || null,
+      artifactErrors,
+    });
+    return res.status(204).send();
+  } catch (error) {
+    logError('api.runs', 'delete.error', { requestId: req.requestId, runId: req.params.id, error });
+    return res.status(500).json({ message: error?.message || 'Failed to delete run' });
   }
 });
 

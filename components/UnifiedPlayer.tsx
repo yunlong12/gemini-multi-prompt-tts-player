@@ -1,27 +1,30 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Download, Link2, ListMusic, Pause, Play, PlayCircle, VolumeX } from 'lucide-react';
-import { arrayBufferToBase64, audioBufferToWavBlob, base64ToUint8Array } from '../utils/audioUtils';
+import { audioBufferToWavBlob } from '../utils/audioUtils';
 import { manualItemToPlayerItem, scheduledRunToPlayerItem } from '../utils/playerItems';
 import { ItemStatus, PlayerItem, ProcessItem, ScheduleRun } from '../types';
 import { PersistedScheduledRun } from '../utils/storage';
+type ScheduledAudioLoadState = 'idle' | 'queued' | 'downloading' | 'decoding' | 'cached' | 'error';
 
 interface UnifiedPlayerProps {
   items: ProcessItem[];
   runs: ScheduleRun[];
   persistedScheduledRuns: Record<string, PersistedScheduledRun>;
-  setPersistedScheduledRuns: React.Dispatch<React.SetStateAction<Record<string, PersistedScheduledRun>>>;
   setItems: React.Dispatch<React.SetStateAction<ProcessItem[]>>;
   setSelectedItemId: React.Dispatch<React.SetStateAction<string | null>>;
   addLog: (msg: string) => void;
   autoplayRequestId: string | null;
   onAutoplayRequestHandled: () => void;
+  scheduledAudioBuffersById: Record<string, AudioBuffer>;
+  scheduledAudioLoadStateById: Record<string, ScheduledAudioLoadState>;
+  scheduledAudioErrorsById: Record<string, string>;
+  loadScheduledRunAudio: (runId: string) => Promise<AudioBuffer | null>;
 }
 
 const sourceLabel = (source: PlayerItem['source']) => (source === 'manual' ? 'Manual' : 'Scheduled');
 const formatPlayerTimestamp = (timestamp: number) => new Date(timestamp).toLocaleString();
 const formatTime = (seconds: number) =>
   !seconds || Number.isNaN(seconds) ? '0:00' : `${Math.floor(seconds / 60)}:${Math.floor(seconds % 60).toString().padStart(2, '0')}`;
-type ScheduledAudioLoadState = 'idle' | 'queued' | 'downloading' | 'decoding' | 'cached' | 'error';
 
 const scheduledStatusLabel = (status: ScheduledAudioLoadState) => {
   switch (status) {
@@ -60,12 +63,15 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
   items,
   runs,
   persistedScheduledRuns,
-  setPersistedScheduledRuns,
   setItems,
   setSelectedItemId,
   addLog,
   autoplayRequestId,
   onAutoplayRequestHandled,
+  scheduledAudioBuffersById,
+  scheduledAudioLoadStateById,
+  scheduledAudioErrorsById,
+  loadScheduledRunAudio,
 }) => {
   const [selectedPlayerItemId, setSelectedPlayerItemId] = useState<string | null>(null);
   const [checkedPlayerItemIds, setCheckedPlayerItemIds] = useState<Record<string, boolean>>({});
@@ -74,16 +80,8 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
   const [playerDuration, setPlayerDuration] = useState(0);
   const [isPlayerPlaying, setIsPlayerPlaying] = useState(false);
   const [isPlayingSequence, setIsPlayingSequence] = useState(false);
-  const [prefetchCycle, setPrefetchCycle] = useState(0);
-  const [scheduledAudioBuffersById, setScheduledAudioBuffersById] = useState<Record<string, AudioBuffer>>({});
-  const [scheduledAudioLoadStateById, setScheduledAudioLoadStateById] = useState<Record<string, ScheduledAudioLoadState>>({});
-  const [scheduledAudioErrorsById, setScheduledAudioErrorsById] = useState<Record<string, string>>({});
   const audioContextRef = useRef<AudioContext | null>(null);
   const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
-  const scheduledAudioLoadPromisesRef = useRef<Record<string, Promise<AudioBuffer | null>>>({});
-  const scheduledAudioHydrationRef = useRef<Record<string, Promise<void>>>({});
-  const scheduledPrefetchedIdsRef = useRef<Record<string, boolean>>({});
-  const scheduledPrefetchRunningRef = useRef(false);
   const playStartRef = useRef(0);
   const pauseOffsetRef = useRef(0);
   const rafRef = useRef<number | null>(null);
@@ -250,193 +248,11 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
     sequenceIndexRef.current = 0;
   };
 
-  const loadScheduledRunAudio = async (playerItem: PlayerItem): Promise<AudioBuffer | null> => {
-    if (playerItem.source !== 'scheduled' || !playerItem.audioUrl) {
-      return playerItem.audioBuffer;
-    }
-    if (scheduledAudioBuffersById[playerItem.id]) {
-      return scheduledAudioBuffersById[playerItem.id];
-    }
-    if (scheduledAudioLoadPromisesRef.current[playerItem.id]) {
-      return scheduledAudioLoadPromisesRef.current[playerItem.id];
-    }
-
-    const promise = (async () => {
-      const runId = playerItem.id.replace('scheduled:', '');
-      const matchingRun = runs.find((run) => run.id === runId) || persistedScheduledRuns[runId];
-      try {
-        addLog(`[Player] Loading scheduled audio for ${playerItem.id.slice(0, 12)}.`);
-        setScheduledAudioLoadStateById((prev) => ({ ...prev, [playerItem.id]: 'downloading' }));
-        setScheduledAudioErrorsById((prev) => {
-          const next = { ...prev };
-          delete next[playerItem.id];
-          return next;
-        });
-        setPersistedScheduledRuns((prev) => ({
-          ...prev,
-          [runId]: {
-            ...prev[runId],
-            ...(matchingRun || {}),
-            cacheStatus: 'downloading',
-            cacheError: '',
-          },
-        }));
-        const response = await fetch(playerItem.audioUrl!);
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-        const arrayBuffer = await response.arrayBuffer();
-        setScheduledAudioLoadStateById((prev) => ({ ...prev, [playerItem.id]: 'decoding' }));
-        setPersistedScheduledRuns((prev) => ({
-          ...prev,
-          [runId]: {
-            ...prev[runId],
-            ...(matchingRun || {}),
-            cacheStatus: 'decoding',
-            cacheError: '',
-          },
-        }));
-        const audioWavBase64 = arrayBufferToBase64(arrayBuffer);
-        const decoded = await getAudioContext().decodeAudioData(arrayBuffer.slice(0));
-        setScheduledAudioBuffersById((prev) => ({ ...prev, [playerItem.id]: decoded }));
-        setScheduledAudioLoadStateById((prev) => ({ ...prev, [playerItem.id]: 'cached' }));
-        if (matchingRun) {
-          setPersistedScheduledRuns((prev) => ({
-            ...prev,
-            [runId]: {
-              ...prev[runId],
-              ...matchingRun,
-              audioWavBase64,
-              cacheStatus: 'cached',
-              cacheError: '',
-            },
-          }));
-        }
-        if (selectedPlayerItemId === playerItem.id) {
-          setPlayerDuration(decoded.duration);
-        }
-        addLog(`[Player] Scheduled audio ready (${decoded.duration.toFixed(2)}s).`);
-        return decoded;
-      } catch (error: any) {
-        const message = error?.message || 'Failed to load scheduled audio';
-        setScheduledAudioLoadStateById((prev) => ({ ...prev, [playerItem.id]: 'error' }));
-        setScheduledAudioErrorsById((prev) => ({ ...prev, [playerItem.id]: message }));
-        setPersistedScheduledRuns((prev) => ({
-          ...prev,
-          [runId]: {
-            ...prev[runId],
-            ...(matchingRun || {}),
-            cacheStatus: 'failed',
-            cacheError: message,
-          },
-        }));
-        addLog(`[Player] Scheduled audio load failed: ${message}`);
-        return null;
-      } finally {
-        delete scheduledAudioLoadPromisesRef.current[playerItem.id];
-      }
-    })();
-
-    scheduledAudioLoadPromisesRef.current[playerItem.id] = promise;
-    return promise;
-  };
-
-  useEffect(() => {
-    const hydratePersistedAudio = async (playerItem: PlayerItem, persistedRun: PersistedScheduledRun) => {
-      if (playerItem.source !== 'scheduled' || !persistedRun.audioWavBase64 || scheduledAudioBuffersById[playerItem.id]) {
-        return;
-      }
-      if (scheduledAudioHydrationRef.current[playerItem.id]) {
-        return scheduledAudioHydrationRef.current[playerItem.id];
-      }
-
-      const promise = (async () => {
-        try {
-          setScheduledAudioLoadStateById((prev) => ({ ...prev, [playerItem.id]: 'decoding' }));
-          const bytes = base64ToUint8Array(persistedRun.audioWavBase64!);
-          const decoded = await getAudioContext().decodeAudioData(bytes.buffer.slice(0));
-          setScheduledAudioBuffersById((prev) => ({ ...prev, [playerItem.id]: decoded }));
-          setScheduledAudioLoadStateById((prev) => ({ ...prev, [playerItem.id]: 'cached' }));
-          setPersistedScheduledRuns((prev) => ({
-            ...prev,
-            [persistedRun.id]: {
-              ...prev[persistedRun.id],
-              cacheStatus: 'cached',
-              cacheError: '',
-            },
-          }));
-          addLog(`[Player] Restored scheduled audio from local cache for ${playerItem.id.slice(0, 12)}.`);
-        } catch (error: any) {
-          setScheduledAudioLoadStateById((prev) => ({ ...prev, [playerItem.id]: 'error' }));
-          setScheduledAudioErrorsById((prev) => ({ ...prev, [playerItem.id]: error?.message || 'Failed to restore cached audio' }));
-          setPersistedScheduledRuns((prev) => ({
-            ...prev,
-            [persistedRun.id]: {
-              ...prev[persistedRun.id],
-              cacheStatus: 'failed',
-              cacheError: error?.message || 'Failed to restore cached audio',
-            },
-          }));
-        } finally {
-          delete scheduledAudioHydrationRef.current[playerItem.id];
-        }
-      })();
-
-      scheduledAudioHydrationRef.current[playerItem.id] = promise;
-      return promise;
-    };
-
-    for (const item of scheduledPlayerItems) {
-      const persistedRun = persistedScheduledRuns[item.id.replace('scheduled:', '')];
-      if (persistedRun?.audioWavBase64) {
-        void hydratePersistedAudio(item, persistedRun);
-      }
-    }
-  }, [scheduledPlayerItems, persistedScheduledRuns]);
-
-  useEffect(() => {
-    if (!scheduledPlayerItems.length) return;
-
-    const missingItems = scheduledPlayerItems.filter((item) => {
-      const runId = item.id.replace('scheduled:', '');
-      const persistedRun = persistedScheduledRuns[runId];
-      return !persistedRun?.audioWavBase64 && !scheduledPrefetchedIdsRef.current[item.id];
-    });
-
-    if (!missingItems.length || scheduledPrefetchRunningRef.current) return;
-
-    for (const item of missingItems) {
-      const runId = item.id.replace('scheduled:', '');
-      setScheduledAudioLoadStateById((prev) => (prev[item.id] ? prev : { ...prev, [item.id]: 'queued' }));
-      setPersistedScheduledRuns((prev) => ({
-        ...prev,
-        [runId]: {
-          ...prev[runId],
-          ...(runs.find((run) => run.id === runId) || {}),
-          cacheStatus: prev[runId]?.audioWavBase64 ? 'cached' : prev[runId]?.cacheStatus || 'queued',
-          cacheError: prev[runId]?.cacheError || '',
-        },
-      }));
-    }
-
-    scheduledPrefetchRunningRef.current = true;
-    addLog(`[Player] Prefetch queue started for ${missingItems.length} scheduled audio item(s), top to bottom.`);
-    void (async () => {
-      for (const item of missingItems) {
-        scheduledPrefetchedIdsRef.current[item.id] = true;
-        await loadScheduledRunAudio(item);
-      }
-      addLog('[Player] Scheduled audio prefetch finished.');
-      scheduledPrefetchRunningRef.current = false;
-      setPrefetchCycle((prev) => prev + 1);
-    })();
-  }, [scheduledPlayerItems, persistedScheduledRuns, runs, prefetchCycle]);
-
   const resolvePlayerBuffer = async (playerItem: PlayerItem) => {
     if (playerItem.source === 'manual') {
       return playerItem.audioBuffer;
     }
-    return loadScheduledRunAudio(playerItem);
+    return loadScheduledRunAudio(playerItem.id.replace('scheduled:', ''));
   };
 
   const selectPlayerItem = async (playerItem: PlayerItem) => {
@@ -450,7 +266,7 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
 
     setSelectedItemId(null);
     setPlayerDuration(0);
-    const buffer = await loadScheduledRunAudio(playerItem);
+    const buffer = await loadScheduledRunAudio(playerItem.id.replace('scheduled:', ''));
     if (buffer) {
       setPlayerDuration(buffer.duration);
     }
