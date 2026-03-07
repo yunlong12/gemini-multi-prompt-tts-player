@@ -76,6 +76,7 @@ const App: React.FC = () => {
   const [isHydrating, setIsHydrating] = useState(true);
   const [isProcessingActive, setIsProcessingActive] = useState(false);
   const [authSession, setAuthSession] = useState<AuthSession | null>(null);
+  const [isAuthBootstrapping, setIsAuthBootstrapping] = useState(true);
   const [isAuthLoading, setIsAuthLoading] = useState(false);
   const [isAdminRefreshing, setIsAdminRefreshing] = useState(false);
   const [isScheduleSaving, setIsScheduleSaving] = useState(false);
@@ -228,6 +229,8 @@ const App: React.FC = () => {
           return;
         }
         addLog(`[Auth] Failed to restore admin session: ${(error as Error)?.message || error}`);
+      } finally {
+        setIsAuthBootstrapping(false);
       }
     };
     void bootstrapAuth();
@@ -562,7 +565,9 @@ const App: React.FC = () => {
       if (isRateLimitError(error)) {
         setRateLimitWarning('login', 'Daily login limit reached: 100 attempts per day.');
       }
-      setAdminError(error?.message || 'Login failed');
+      const message = error?.message || 'Login failed';
+      setAdminError(message);
+      throw new Error(message);
     } finally {
       setIsAuthLoading(false);
     }
@@ -896,80 +901,121 @@ const App: React.FC = () => {
       checkbox.indeterminate = selectedCount > 0 && selectedCount < group.entries.length;
     });
   }, [historyGroups, selectedHistoryEntryIds]);
-  const adminPanel = !isAdminAuthenticated
-    ? <LoginForm onLogin={handleAdminLogin} isLoading={isAuthLoading} />
-    : <>
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-xl font-semibold text-white">Schedule Manager</h2>
-            <p className="text-sm text-slate-400">Cloud Scheduler can trigger these prompts in the background.</p>
-          </div>
-          <button onClick={() => void handleAdminLogout()} className="px-3 py-2 rounded-lg text-sm font-semibold bg-slate-800 text-slate-300 border border-slate-700 hover:bg-slate-700">Sign Out</button>
+  const adminPanel = <>
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-semibold text-white">Schedule Manager</h2>
+          <p className="text-sm text-slate-400">Cloud Scheduler can trigger these prompts in the background.</p>
         </div>
-        {adminError && <div className="text-sm text-red-400 bg-red-950/30 border border-red-900/30 rounded-md p-3">{adminError}</div>}
-        <div className="bg-slate-900 border border-slate-800 rounded-lg p-4 space-y-3">
-          <div>
-            <h3 className="text-sm font-semibold text-slate-100">Scheduler Polling</h3>
-            <p className="text-xs text-slate-400">Controls Cloud Scheduler job <span className="font-mono">{schedulerConfig?.jobName || 'schedule-runner'}</span>.</p>
-          </div>
-          <div className="grid gap-3 md:grid-cols-2">
-            <label className="text-sm text-slate-300">
-              <span className="block mb-1">Polling Interval (minutes)</span>
-              <div className="flex gap-2">
-                <select
-                  value={POLLING_PRESETS.includes(schedulerIntervalMinutesDraft) ? schedulerIntervalMinutesDraft : 0}
-                  onChange={(e) => {
-                    const next = Number(e.target.value);
-                    if (next > 0) setSchedulerIntervalMinutesDraft(next);
-                  }}
-                  className="w-40 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value={0}>Custom</option>
-                  {POLLING_PRESETS.map((minutes) => (
-                    <option key={minutes} value={minutes}>
-                      Every {minutes} min
-                    </option>
-                  ))}
-                </select>
-                <input
-                  type="number"
-                  min={1}
-                  max={60}
-                  value={schedulerIntervalMinutesDraft}
-                  onChange={(e) => setSchedulerIntervalMinutesDraft(Math.max(1, Math.min(60, Number(e.target.value) || 1)))}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </div>
-            </label>
-            <label className="text-sm text-slate-300">
-              <span className="block mb-1">Timezone</span>
+        <button onClick={() => void handleAdminLogout()} className="px-3 py-2 rounded-lg text-sm font-semibold bg-slate-800 text-slate-300 border border-slate-700 hover:bg-slate-700">Sign Out</button>
+      </div>
+      {adminError && <div className="text-sm text-red-400 bg-red-950/30 border border-red-900/30 rounded-md p-3">{adminError}</div>}
+      <div className="bg-slate-900 border border-slate-800 rounded-lg p-4 space-y-3">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-100">Scheduler Polling</h3>
+          <p className="text-xs text-slate-400">Controls Cloud Scheduler job <span className="font-mono">{schedulerConfig?.jobName || 'schedule-runner'}</span>.</p>
+        </div>
+        <div className="grid gap-3 md:grid-cols-2">
+          <label className="text-sm text-slate-300">
+            <span className="block mb-1">Polling Interval (minutes)</span>
+            <div className="flex gap-2">
+              <select
+                value={POLLING_PRESETS.includes(schedulerIntervalMinutesDraft) ? schedulerIntervalMinutesDraft : 0}
+                onChange={(e) => {
+                  const next = Number(e.target.value);
+                  if (next > 0) setSchedulerIntervalMinutesDraft(next);
+                }}
+                className="w-40 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value={0}>Custom</option>
+                {POLLING_PRESETS.map((minutes) => (
+                  <option key={minutes} value={minutes}>
+                    Every {minutes} min
+                  </option>
+                ))}
+              </select>
               <input
-                value={schedulerTimezoneDraft}
-                onChange={(e) => setSchedulerTimezoneDraft(e.target.value)}
-                placeholder="Europe/Paris"
+                type="number"
+                min={1}
+                max={60}
+                value={schedulerIntervalMinutesDraft}
+                onChange={(e) => setSchedulerIntervalMinutesDraft(Math.max(1, Math.min(60, Number(e.target.value) || 1)))}
                 className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 outline-none focus:ring-2 focus:ring-blue-500"
               />
-            </label>
-          </div>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => void handleSchedulerConfigSave()}
-              disabled={schedulerIntervalMinutesDraft < 1 || isSchedulerSaving}
-              className={`px-3 py-2 rounded-lg text-sm font-semibold ${schedulerIntervalMinutesDraft < 1 || isSchedulerSaving ? 'bg-slate-800 text-slate-500 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-500 text-white'}`}
-            >
-              {isSchedulerSaving ? 'Saving...' : 'Update Polling'}
-            </button>
-            {schedulerConfig && <span className="text-xs text-slate-400">Current: every {cronToMinutes(schedulerConfig.schedule || '') || 5} min ({schedulerConfig.timeZone})</span>}
-          </div>
+            </div>
+          </label>
+          <label className="text-sm text-slate-300">
+            <span className="block mb-1">Timezone</span>
+            <input
+              value={schedulerTimezoneDraft}
+              onChange={(e) => setSchedulerTimezoneDraft(e.target.value)}
+              placeholder="Europe/Paris"
+              className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </label>
         </div>
-        <div className="grid gap-6 lg:grid-cols-[minmax(0,420px),1fr]">
-          <ScheduleForm initialValue={editingSchedule} onSubmit={handleScheduleSave} onCancel={() => setEditingSchedule(null)} isSaving={isScheduleSaving} />
-          <div className="space-y-4">
-            <button onClick={() => void refreshAdminData()} disabled={isAdminRefreshing} className={`px-3 py-2 rounded-lg text-sm font-semibold ${isAdminRefreshing ? 'bg-slate-800 text-slate-500' : 'bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700'}`}>{isAdminRefreshing ? 'Refreshing...' : 'Refresh'}</button>
-            <ScheduleList schedules={schedules} onEdit={setEditingSchedule} onDelete={handleScheduleDelete} onRunNow={handleScheduleRunNow} />
-          </div>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => void handleSchedulerConfigSave()}
+            disabled={schedulerIntervalMinutesDraft < 1 || isSchedulerSaving}
+            className={`px-3 py-2 rounded-lg text-sm font-semibold ${schedulerIntervalMinutesDraft < 1 || isSchedulerSaving ? 'bg-slate-800 text-slate-500 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-500 text-white'}`}
+          >
+            {isSchedulerSaving ? 'Saving...' : 'Update Polling'}
+          </button>
+          {schedulerConfig && <span className="text-xs text-slate-400">Current: every {cronToMinutes(schedulerConfig.schedule || '') || 5} min ({schedulerConfig.timeZone})</span>}
         </div>
-      </>;
+      </div>
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,420px),1fr]">
+        <ScheduleForm initialValue={editingSchedule} onSubmit={handleScheduleSave} onCancel={() => setEditingSchedule(null)} isSaving={isScheduleSaving} />
+        <div className="space-y-4">
+          <button onClick={() => void refreshAdminData()} disabled={isAdminRefreshing} className={`px-3 py-2 rounded-lg text-sm font-semibold ${isAdminRefreshing ? 'bg-slate-800 text-slate-500' : 'bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700'}`}>{isAdminRefreshing ? 'Refreshing...' : 'Refresh'}</button>
+          <ScheduleList schedules={schedules} onEdit={setEditingSchedule} onDelete={handleScheduleDelete} onRunNow={handleScheduleRunNow} />
+        </div>
+      </div>
+    </>;
+
+  if (isAuthBootstrapping) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center px-6">
+        <div className="text-center space-y-3">
+          <div className="text-2xl font-semibold text-white">Restoring Session</div>
+          <div className="text-sm text-slate-400">Checking saved admin login...</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAdminAuthenticated) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center px-6">
+        <div className="fixed inset-0 bg-slate-950/95" />
+        <div className="relative z-10 w-full max-w-md">
+          <div className="mb-6 text-center">
+            <h1 className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-emerald-400 mb-2">Gemini Audio Summarizer</h1>
+            <p className="text-slate-400">Sign in to enter the app.</p>
+          </div>
+          {activeRateLimitWarnings.length > 0 && (
+            <div className="mb-4 rounded-2xl border border-amber-500/40 bg-amber-500/10 p-4 shadow-lg shadow-amber-950/20">
+              <div className="mb-3 flex items-center gap-2 text-amber-200">
+                <AlertTriangle size={18} />
+                <span className="text-sm font-semibold uppercase tracking-wide">Usage Limit Reached</span>
+              </div>
+              <div className="space-y-2">
+                {activeRateLimitWarnings.map(([scope, message]) => (
+                  <div key={scope} className="rounded-xl border border-amber-500/20 bg-slate-950/40 px-4 py-3 text-sm text-amber-100">
+                    <span className="mr-2 font-semibold uppercase">{scope}</span>
+                    <span>{message}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {adminError && <div className="mb-4 text-sm text-red-400 bg-red-950/30 border border-red-900/30 rounded-md p-3">{adminError}</div>}
+          <LoginForm onLogin={handleAdminLogin} isLoading={isAuthLoading} />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-6xl mx-auto p-6 md:p-12">
@@ -1123,7 +1169,7 @@ const App: React.FC = () => {
       </div>}
 
       {activeTab === 'schedules' && <div className="space-y-4">{adminPanel}</div>}
-      {activeTab === 'runs' && <div className="space-y-4">{!isAdminAuthenticated ? <LoginForm onLogin={handleAdminLogin} isLoading={isAuthLoading} /> : <><div className="flex items-center justify-between"><div><h2 className="text-xl font-semibold text-white">Scheduled Runs</h2><p className="text-sm text-slate-400">Latest automated or manual schedule executions.</p></div><button onClick={() => void refreshAdminData()} disabled={isAdminRefreshing} className={`px-3 py-2 rounded-lg text-sm font-semibold ${isAdminRefreshing ? 'bg-slate-800 text-slate-500' : 'bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700'}`}>{isAdminRefreshing ? 'Refreshing...' : 'Refresh'}</button></div>{adminError && <div className="text-sm text-red-400 bg-red-950/30 border border-red-900/30 rounded-md p-3">{adminError}</div>}<RunHistoryList runs={runs} /></>}</div>}
+      {activeTab === 'runs' && <div className="space-y-4"><div className="flex items-center justify-between"><div><h2 className="text-xl font-semibold text-white">Scheduled Runs</h2><p className="text-sm text-slate-400">Latest automated or manual schedule executions.</p></div><button onClick={() => void refreshAdminData()} disabled={isAdminRefreshing} className={`px-3 py-2 rounded-lg text-sm font-semibold ${isAdminRefreshing ? 'bg-slate-800 text-slate-500' : 'bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700'}`}>{isAdminRefreshing ? 'Refreshing...' : 'Refresh'}</button></div>{adminError && <div className="text-sm text-red-400 bg-red-950/30 border border-red-900/30 rounded-md p-3">{adminError}</div>}<RunHistoryList runs={runs} /></div>}
     </div>
   );
 };
