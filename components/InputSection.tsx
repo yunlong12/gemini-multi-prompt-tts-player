@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { PlayCircle, MessageSquarePlus, Settings2 } from 'lucide-react';
+import { GeminiToolOptions } from '../types';
 
 interface InputSectionProps {
-  onProcess: (prompts: string[], ttsModel: string) => void;
+  onProcess: (prompts: string[], ttsModel: string, toolOptions: GeminiToolOptions) => void;
   isProcessing: boolean;
   warningMessage?: string;
 }
@@ -10,6 +11,8 @@ interface InputSectionProps {
 export const InputSection: React.FC<InputSectionProps> = ({ onProcess, isProcessing, warningMessage }) => {
   const [inputText, setInputText] = useState('');
   const [selectedModel, setSelectedModel] = useState('gemini-2.5-pro-preview-tts');
+  const [enableGoogleSearch, setEnableGoogleSearch] = useState(true);
+  const [enableUrlContext, setEnableUrlContext] = useState(false);
 
   const handleProcess = () => {
     if (!inputText.trim() || warningMessage) return;
@@ -19,7 +22,7 @@ export const InputSection: React.FC<InputSectionProps> = ({ onProcess, isProcess
       .filter(line => line.length > 0);
     
     if (prompts.length > 0) {
-      onProcess(prompts, selectedModel);
+      onProcess(prompts, selectedModel, { enableGoogleSearch, enableUrlContext });
       setInputText('');
     }
   };
@@ -48,6 +51,30 @@ export const InputSection: React.FC<InputSectionProps> = ({ onProcess, isProcess
       <p className="text-sm text-slate-400 mb-2">
         Enter multiple prompts (one per line). Each will be processed individually.
       </p>
+      <div className="mb-4 flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => setEnableGoogleSearch((prev) => !prev)}
+          className={`rounded-lg border px-3 py-2 text-sm font-semibold transition-colors ${
+            enableGoogleSearch
+              ? 'border-blue-500 bg-blue-500/15 text-blue-200'
+              : 'border-slate-700 bg-slate-900 text-slate-400'
+          }`}
+        >
+          Google Search {enableGoogleSearch ? 'On' : 'Off'}
+        </button>
+        <button
+          type="button"
+          onClick={() => setEnableUrlContext((prev) => !prev)}
+          className={`rounded-lg border px-3 py-2 text-sm font-semibold transition-colors ${
+            enableUrlContext
+              ? 'border-emerald-500 bg-emerald-500/15 text-emerald-200'
+              : 'border-slate-700 bg-slate-900 text-slate-400'
+          }`}
+        >
+          URL Context {enableUrlContext ? 'On' : 'Off'}
+        </button>
+      </div>
       {warningMessage && (
         <div className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
           {warningMessage}

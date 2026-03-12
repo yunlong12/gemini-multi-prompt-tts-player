@@ -66,8 +66,11 @@ Steps:
 1. Select a TTS model:
    - `Gemini 2.5 Pro TTS (High Quality)`
    - `Gemini 2.5 Flash TTS (Faster)`
-2. Enter one prompt per line.
-3. Click `Generate & Prepare Audio`.
+2. Toggle Gemini tools as needed:
+   - `Google Search` defaults to on
+   - `URL Context` defaults to off
+3. Enter one prompt per line.
+4. Click `Generate & Prepare Audio`.
 
 What happens next:
 
@@ -149,6 +152,8 @@ You can create or edit schedules with these fields:
 - `Name`
 - `Timezone`
 - `Prompt Template`
+- `Google Search`
+- `URL Context`
 - `Frequency`
   - `Daily`
   - `Weekly`
@@ -165,6 +170,12 @@ Prompt templates support:
 - `{{today}}`
 - `{{yesterday}}`
 - `{{timezone}}`
+
+Tool defaults for schedules:
+
+- Existing schedules that do not already store tool settings behave as `Google Search = on`
+- Existing schedules that do not already store tool settings behave as `URL Context = off`
+- New schedules use the same defaults unless changed in the form
 
 Available schedule actions:
 

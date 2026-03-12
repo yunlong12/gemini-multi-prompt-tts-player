@@ -1,4 +1,4 @@
-import { GroundingUrl } from "../types";
+import { GeminiToolOptions, GroundingUrl } from "../types";
 
 interface TextResult {
   text: string;
@@ -29,23 +29,41 @@ const cleanTextForTTS = (text: string): string => {
     .trim();
 };
 
-export const generateTextAnswer = async (prompt: string, log: LogFn): Promise<TextResult> => {
+const parseApiPayload = async (response: Response) => {
+  const rawText = await response.text();
+  if (!rawText) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(rawText);
+  } catch {
+    return rawText;
+  }
+};
+
+export const generateTextAnswer = async (
+  prompt: string,
+  toolOptions: GeminiToolOptions,
+  log: LogFn
+): Promise<TextResult> => {
   try {
     log(`[Text] Initializing request for prompt: "${prompt.substring(0, 30)}..."`);
     log(`[Text] Calling backend /api/text...`);
     const response = await fetch('/api/text', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({ prompt, ...toolOptions }),
     });
 
-    const data = await response.json();
+    const data = await parseApiPayload(response);
     if (!response.ok) {
-      throw toApiError(data?.message || `HTTP ${response.status}`, response.status);
+      const message = typeof data === 'string' ? data : data?.message;
+      throw toApiError(message || `HTTP ${response.status}`, response.status);
     }
 
-    const text = data?.text || "No response generated.";
-    const groundingLinks = Array.isArray(data?.groundingLinks) ? data.groundingLinks : [];
+    const text = typeof data === 'object' && data?.text ? data.text : "No response generated.";
+    const groundingLinks = typeof data === 'object' && Array.isArray(data?.groundingLinks) ? data.groundingLinks : [];
     log(`[Text] Response received. Text length: ${text.length} chars.`);
 
     return { text, groundingLinks };
@@ -68,11 +86,12 @@ export const generateSpeech = async (text: string, model: string, log: LogFn): P
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: cleanedText, model }),
     });
-    const data = await response.json();
+    const data = await parseApiPayload(response);
     if (!response.ok) {
-      throw toApiError(data?.message || `HTTP ${response.status}`, response.status);
+      const message = typeof data === 'string' ? data : data?.message;
+      throw toApiError(message ? `TTS request failed: ${message}` : `HTTP ${response.status}`, response.status);
     }
-    const audioData = data?.audioBase64;
+    const audioData = typeof data === 'object' ? data?.audioBase64 : undefined;
     if (!audioData) {
       log(`[TTS] Error: audioBase64 is missing or empty.`);
       throw new Error("No audio data received from backend");

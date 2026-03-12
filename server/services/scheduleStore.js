@@ -71,6 +71,8 @@ function sanitizeScheduleInput(input, existing = null) {
   const timeOfDay = input.timeOfDay || base.timeOfDay || '08:00';
   const ttsModel = input.ttsModel || base.ttsModel || DEFAULT_TTS_MODEL;
   const enabled = input.enabled ?? base.enabled ?? true;
+  const enableGoogleSearch = input.enableGoogleSearch ?? base.enableGoogleSearch ?? true;
+  const enableUrlContext = input.enableUrlContext ?? base.enableUrlContext ?? false;
   const outputPrefix = String(input.outputPrefix || base.outputPrefix || 'daily-briefings').trim() || 'daily-briefings';
 
   if (!String(input.name || base.name || '').trim()) {
@@ -89,6 +91,8 @@ function sanitizeScheduleInput(input, existing = null) {
     ...base,
     name: String(input.name ?? base.name).trim(),
     promptTemplate: String(input.promptTemplate ?? base.promptTemplate).trim(),
+    enableGoogleSearch: Boolean(enableGoogleSearch),
+    enableUrlContext: Boolean(enableUrlContext),
     enabled: Boolean(enabled),
     timezone,
     frequency,

@@ -39,9 +39,10 @@ function datePartsFromIso(isoString) {
   };
 }
 
-function buildObjectPath({ scheduleId, runId, startedAt, outputPrefix, extension }) {
+function buildObjectPath({ scheduleId, runId, startedAt, outputPrefix, extension, partIndex }) {
   const dateParts = datePartsFromIso(startedAt);
-  return `${outputPrefix}/${scheduleId}/${dateParts.year}/${dateParts.month}/${dateParts.day}/${runId}.${extension}`;
+  const suffix = partIndex ? `-part-${String(partIndex).padStart(2, '0')}` : '';
+  return `${outputPrefix}/${scheduleId}/${dateParts.year}/${dateParts.month}/${dateParts.day}/${runId}${suffix}.${extension}`;
 }
 
 function sanitizeObjectPath(objectPath) {
@@ -74,12 +75,13 @@ async function ensureLocalResultDir(objectPath) {
   return fullPath;
 }
 
-export async function saveAudio({ scheduleId, runId, startedAt, outputPrefix, wavBuffer }) {
+export async function saveAudio({ scheduleId, runId, startedAt, outputPrefix, wavBuffer, partIndex }) {
   const objectPath = sanitizeObjectPath(buildObjectPath({
     scheduleId,
     runId,
     startedAt,
     outputPrefix,
+    partIndex,
     extension: 'wav',
   }));
   const cloudStorage = getStorage();
@@ -108,12 +110,13 @@ export async function saveAudio({ scheduleId, runId, startedAt, outputPrefix, wa
   };
 }
 
-export async function saveTextArtifact({ scheduleId, runId, startedAt, outputPrefix, payload }) {
+export async function saveTextArtifact({ scheduleId, runId, startedAt, outputPrefix, payload, partIndex }) {
   const objectPath = sanitizeObjectPath(buildObjectPath({
     scheduleId,
     runId,
     startedAt,
     outputPrefix,
+    partIndex,
     extension: 'json',
   }));
   const body = JSON.stringify(payload, null, 2);

@@ -23,12 +23,17 @@ import {
   updateSchedulerConfig as updateSchedulerConfigApi,
 } from './services/adminApi';
 import { generateSpeech, generateTextAnswer } from './services/geminiService';
-import { AuthSession, ItemStatus, ProcessItem, Schedule, SchedulerConfig, ScheduleRun } from './types';
+import { AuthSession, GeminiToolOptions, ItemStatus, ProcessItem, Schedule, SchedulerConfig, ScheduleRun } from './types';
 import { arrayBufferToBase64, base64ToUint8Array, decodeAudioData } from './utils/audioUtils';
 import { clearPersistedState, loadPersistedState, PersistedScheduledRun, PersistedState, savePersistedState } from './utils/storage';
+import { formatPartLabel, splitTextForTTS } from './utils/ttsChunks';
 
 const ONE_HOUR_MS = 3600000;
 const DEFAULT_TTS_MODEL = 'gemini-2.5-pro-preview-tts';
+const DEFAULT_TOOL_OPTIONS: Required<GeminiToolOptions> = {
+  enableGoogleSearch: true,
+  enableUrlContext: false,
+};
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const POLLING_PRESETS = [1, 5, 10, 15, 30, 60];
 type RateLimitScope = 'login' | 'text' | 'tts';
@@ -253,12 +258,12 @@ const App: React.FC = () => {
             if (status === ItemStatus.GENERATING_TEXT || status === ItemStatus.GENERATING_AUDIO) { status = ItemStatus.ERROR; error = error || 'Process interrupted (page refresh or crash)'; }
             else if (status === ItemStatus.PLAYING) status = ItemStatus.READY;
             if (audioBuffer && status !== ItemStatus.ERROR) status = ItemStatus.READY;
-            return { id: item.id, prompt: item.prompt, answer: item.answer, groundingLinks: item.groundingLinks || [], audioBuffer, audioBase64: item.audioBase64, ttsModel: item.ttsModel, error, status, timestamp: item.timestamp || persisted.updatedAt };
+            return { id: item.id, prompt: item.prompt, answer: item.answer, groundingLinks: item.groundingLinks || [], audioBuffer, audioBase64: item.audioBase64, ttsModel: item.ttsModel, enableGoogleSearch: item.enableGoogleSearch ?? DEFAULT_TOOL_OPTIONS.enableGoogleSearch, enableUrlContext: item.enableUrlContext ?? DEFAULT_TOOL_OPTIONS.enableUrlContext, partIndex: item.partIndex, partCount: item.partCount, partGroupId: item.partGroupId, error, status, timestamp: item.timestamp || persisted.updatedAt };
           }));
           setItems((prev) => {
             const unique = new Map<string, ProcessItem>();
             [...hydratedItems, ...prev].forEach((item) => unique.set(item.id, item));
-            return Array.from(unique.values()).sort((a, b) => b.timestamp - a.timestamp);
+            return Array.from(unique.values()).sort((a, b) => b.timestamp - a.timestamp || (a.partIndex || 1) - (b.partIndex || 1));
           });
           setPersistedScheduledRuns(
             Object.fromEntries((persisted.scheduledRuns || []).map((run) => [run.id, run]))
@@ -278,7 +283,7 @@ const App: React.FC = () => {
     if (isHydrating) return;
     const timeout = setTimeout(async () => {
       const state: PersistedState = {
-        items: items.map((item) => ({ id: item.id, prompt: item.prompt, answer: item.answer, groundingLinks: item.groundingLinks, audioBase64: item.audioBase64, ttsModel: item.ttsModel, error: item.error, status: item.status, timestamp: item.timestamp })),
+        items: items.map((item) => ({ id: item.id, prompt: item.prompt, answer: item.answer, groundingLinks: item.groundingLinks, audioBase64: item.audioBase64, ttsModel: item.ttsModel, enableGoogleSearch: item.enableGoogleSearch, enableUrlContext: item.enableUrlContext, partIndex: item.partIndex, partCount: item.partCount, partGroupId: item.partGroupId, error: item.error, status: item.status, timestamp: item.timestamp })),
         scheduledRuns: Object.values(persistedScheduledRuns),
         recentPrompts: [],
         updatedAt: Date.now(),
@@ -504,20 +509,95 @@ const App: React.FC = () => {
         addLog(`Processing "${currentPrompt}" (${processingQueueRef.current.length} queued after this).`);
         setItems((prev) => prev.map((item) => item.id === currentId ? { ...item, status: ItemStatus.GENERATING_TEXT, error: undefined } : item));
         try {
-          const { text, groundingLinks } = await generateTextAnswer(currentPrompt, addLog);
+          const { text, groundingLinks } = await generateTextAnswer(
+            currentPrompt,
+            {
+              enableGoogleSearch: currentItem.enableGoogleSearch ?? DEFAULT_TOOL_OPTIONS.enableGoogleSearch,
+              enableUrlContext: currentItem.enableUrlContext ?? DEFAULT_TOOL_OPTIONS.enableUrlContext,
+            },
+            addLog
+          );
           clearRateLimitWarning('text');
-          if (stopProcessingRef.current) { setItems((prev) => prev.map((item) => item.id === currentId ? { ...item, status: ItemStatus.ERROR, error: 'Stopped by user.' } : item)); break; }
+          if (stopProcessingRef.current) {
+            setItems((prev) => {
+              const next = prev.map((item) => item.id === currentId ? { ...item, status: ItemStatus.ERROR, error: 'Stopped by user.' } : item);
+              itemsRef.current = next;
+              return next;
+            });
+            break;
+          }
           if (!itemsRef.current.some((item) => item.id === currentId)) { addLog(`Item deleted during processing, skipping "${currentPrompt}".`); continue; }
-          setItems((prev) => prev.map((item) => item.id === currentId ? { ...item, answer: text, groundingLinks, status: ItemStatus.GENERATING_AUDIO } : item));
           currentStage = 'tts';
-          const base64Audio = await generateSpeech(text, modelForItem, addLog);
-          clearRateLimitWarning('tts');
-          if (stopProcessingRef.current) { setItems((prev) => prev.map((item) => item.id === currentId ? { ...item, status: ItemStatus.ERROR, error: 'Stopped by user.' } : item)); break; }
-          if (!itemsRef.current.some((item) => item.id === currentId)) { addLog(`Item deleted before audio decode, skipping "${currentPrompt}".`); continue; }
-          const audioBuffer = await decodeAudioData(base64Audio, getAudioContext(), addLog);
-          setItems((prev) => prev.map((item) => item.id === currentId ? { ...item, audioBuffer, audioBase64: base64Audio, status: ItemStatus.READY } : item));
-          setSelectedItemId((prev) => prev || currentId);
-          setPlayerAutoplayRequestId((prev) => prev || `manual:${currentId}`);
+          const ttsChunks = splitTextForTTS(text);
+          const partGroupId = ttsChunks.length > 1 ? uuidv4() : currentId;
+          const chunkedItems: ProcessItem[] = ttsChunks.map((chunk, index) => ({
+            id: index === 0 ? currentId : uuidv4(),
+            prompt: currentPrompt,
+            answer: chunk.text,
+            audioBuffer: null,
+            audioBase64: undefined,
+            ttsModel: modelForItem,
+            enableGoogleSearch: currentItem.enableGoogleSearch ?? DEFAULT_TOOL_OPTIONS.enableGoogleSearch,
+            enableUrlContext: currentItem.enableUrlContext ?? DEFAULT_TOOL_OPTIONS.enableUrlContext,
+            partIndex: chunk.partIndex,
+            partCount: chunk.partCount,
+            partGroupId,
+            status: ItemStatus.QUEUED,
+            groundingLinks,
+            timestamp: currentItem.timestamp,
+          }));
+          setItems((prev) => {
+            const next = prev.flatMap((item) => item.id === currentId ? chunkedItems : [item]);
+            itemsRef.current = next;
+            return next;
+          });
+          if (chunkedItems.length > 1) {
+            addLog(`[TTS] Split long text into ${chunkedItems.length} part(s) for "${currentPrompt}".`);
+          }
+
+          for (const partItem of chunkedItems) {
+            const partLabel = formatPartLabel(partItem.partIndex, partItem.partCount) || 'single part';
+            setItems((prev) => {
+              const next = prev.map((item) => item.id === partItem.id ? { ...item, status: ItemStatus.GENERATING_AUDIO, error: undefined } : item);
+              itemsRef.current = next;
+              return next;
+            });
+            try {
+              addLog(`[TTS] Generating ${partLabel} for "${currentPrompt}".`);
+              const base64Audio = await generateSpeech(partItem.answer || '', modelForItem, addLog);
+              clearRateLimitWarning('tts');
+              if (stopProcessingRef.current) {
+                setItems((prev) => {
+                  const next = prev.map((item) => item.id === partItem.id ? { ...item, status: ItemStatus.ERROR, error: 'Stopped by user.' } : item);
+                  itemsRef.current = next;
+                  return next;
+                });
+                break;
+              }
+              if (!itemsRef.current.some((item) => item.id === partItem.id)) {
+                addLog(`Item deleted before audio decode, skipping "${currentPrompt}" ${partLabel}.`);
+                continue;
+              }
+              const audioBuffer = await decodeAudioData(base64Audio, getAudioContext(), addLog);
+              setItems((prev) => {
+                const next = prev.map((item) => item.id === partItem.id ? { ...item, audioBuffer, audioBase64: base64Audio, status: ItemStatus.READY } : item);
+                itemsRef.current = next;
+                return next;
+              });
+              setSelectedItemId((prev) => prev || partItem.id);
+              setPlayerAutoplayRequestId((prev) => prev || `manual:${partItem.id}`);
+            } catch (partError: any) {
+              addLog(`Error: ${partError.message}`);
+              if (isRateLimitError(partError)) {
+                setRateLimitWarning('tts', 'Daily TTS limit reached: 200 requests per day.');
+              }
+              setItems((prev) => {
+                const next = prev.map((item) => item.id === partItem.id ? { ...item, status: ItemStatus.ERROR, error: partError.message } : item);
+                itemsRef.current = next;
+                return next;
+              });
+            }
+          }
           addLog(`Completed "${currentPrompt}".`);
         } catch (error: any) {
           addLog(`Error: ${error.message}`);
@@ -528,7 +608,11 @@ const App: React.FC = () => {
                 : 'Daily TTS limit reached: 200 requests per day.';
             setRateLimitWarning(currentStage, warningMessage);
           }
-          setItems((prev) => prev.map((item) => item.id === currentId ? { ...item, status: ItemStatus.ERROR, error: error.message } : item));
+          setItems((prev) => {
+            const next = prev.map((item) => item.id === currentId ? { ...item, status: ItemStatus.ERROR, error: error.message } : item);
+            itemsRef.current = next;
+            return next;
+          });
         }
       }
     } finally {
@@ -538,16 +622,20 @@ const App: React.FC = () => {
     }
   };
 
-  const processPrompts = async (prompts: string[], ttsModel: string) => {
+  const processPrompts = async (prompts: string[], ttsModel: string, toolOptions: GeminiToolOptions) => {
     const cleanPrompts = prompts.map((p) => p.trim()).filter(Boolean);
     if (!cleanPrompts.length) return;
     stopProcessingRef.current = false;
     const timestamp = Date.now();
-    const newItems = cleanPrompts.map((prompt) => ({ id: uuidv4(), prompt, answer: null, audioBuffer: null, audioBase64: undefined, ttsModel, status: ItemStatus.QUEUED, groundingLinks: [], timestamp }));
+    const normalizedToolOptions = {
+      enableGoogleSearch: toolOptions.enableGoogleSearch ?? DEFAULT_TOOL_OPTIONS.enableGoogleSearch,
+      enableUrlContext: toolOptions.enableUrlContext ?? DEFAULT_TOOL_OPTIONS.enableUrlContext,
+    };
+    const newItems = cleanPrompts.map((prompt) => ({ id: uuidv4(), prompt, answer: null, audioBuffer: null, audioBase64: undefined, ttsModel, enableGoogleSearch: normalizedToolOptions.enableGoogleSearch, enableUrlContext: normalizedToolOptions.enableUrlContext, partIndex: undefined, partCount: undefined, partGroupId: undefined, status: ItemStatus.QUEUED, groundingLinks: [], timestamp }));
     processingQueueRef.current.push(...newItems.map((item) => item.id));
     itemsRef.current = [...newItems, ...itemsRef.current];
     setItems((prev) => [...newItems, ...prev]);
-    addLog(`Enqueued ${newItems.length} prompt(s) with ${ttsModel}. Queue length: ${processingQueueRef.current.length}.`);
+    addLog(`Enqueued ${newItems.length} prompt(s) with ${ttsModel}. Tools: googleSearch=${normalizedToolOptions.enableGoogleSearch}, urlContext=${normalizedToolOptions.enableUrlContext}. Queue length: ${processingQueueRef.current.length}.`);
     if (!isWorkerRunningRef.current) void runQueueWorker();
   };
 
@@ -762,7 +850,9 @@ const App: React.FC = () => {
     scheduledPrefetchRunningRef.current = false;
     void clearPersistedState();
   };
-  const resultsItems = items.filter((item) => Date.now() - item.timestamp < ONE_HOUR_MS);
+  const resultsItems = items
+    .filter((item) => Date.now() - item.timestamp < ONE_HOUR_MS)
+    .sort((a, b) => b.timestamp - a.timestamp || (a.partIndex || 1) - (b.partIndex || 1));
   const persistedScheduledHistory = Object.values(persistedScheduledRuns);
   const historyEntries = [
     ...items.map((item) => ({
@@ -770,8 +860,9 @@ const App: React.FC = () => {
       source: 'manual' as const,
       targetId: item.id,
       timestamp: item.timestamp,
-      title: item.prompt,
+      title: formatPartLabel(item.partIndex, item.partCount) ? `${item.prompt} (${formatPartLabel(item.partIndex, item.partCount)})` : item.prompt,
       body: item.answer || 'No answer',
+      partIndex: item.partIndex,
       playable: Boolean(item.audioBuffer),
       isActive: item.status === ItemStatus.PLAYING || selectedItemId === item.id,
       onPlay: () => {
@@ -789,8 +880,9 @@ const App: React.FC = () => {
       source: 'scheduled' as const,
       targetId: run.id,
       timestamp: new Date(run.startedAt).getTime(),
-      title: run.resolvedPrompt,
+      title: formatPartLabel(run.partIndex, run.partCount) ? `${run.resolvedPrompt} (${formatPartLabel(run.partIndex, run.partCount)})` : run.resolvedPrompt,
       body: run.generatedText || run.errorMessage || 'No text available',
+      partIndex: run.partIndex,
       playable: Boolean(run.audioWavBase64 || run.audioPath),
       isActive: playerAutoplayRequestId === `scheduled:${run.id}`,
       onPlay: () => {
@@ -802,7 +894,7 @@ const App: React.FC = () => {
         void handleScheduledHistoryDelete(run.id);
       },
     })),
-  ].sort((a, b) => b.timestamp - a.timestamp);
+  ].sort((a, b) => b.timestamp - a.timestamp || (a.partIndex || 1) - (b.partIndex || 1));
   const historyGroups = historyEntries.reduce<Array<{
     key: string;
     label: string;

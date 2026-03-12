@@ -13,6 +13,8 @@ const dayLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const defaultDraft: Partial<Schedule> = {
   name: '',
   promptTemplate: '',
+  enableGoogleSearch: true,
+  enableUrlContext: false,
   enabled: true,
   timezone: 'Europe/Paris',
   frequency: 'daily',
@@ -78,6 +80,30 @@ export const ScheduleForm: React.FC<ScheduleFormProps> = ({ initialValue, onSubm
           className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 outline-none focus:ring-2 focus:ring-blue-500 resize-y"
         />
         <span className="mt-1 block text-xs text-slate-500">{'Supports {{today}}, {{yesterday}}, {{timezone}}.'}</span>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => setDraft((prev) => ({ ...prev, enableGoogleSearch: !(prev.enableGoogleSearch ?? true) }))}
+            className={`rounded-lg border px-3 py-2 text-sm font-semibold transition-colors ${
+              draft.enableGoogleSearch ?? true
+                ? 'border-blue-500 bg-blue-500/15 text-blue-200'
+                : 'border-slate-700 bg-slate-950 text-slate-400'
+            }`}
+          >
+            Google Search {(draft.enableGoogleSearch ?? true) ? 'On' : 'Off'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setDraft((prev) => ({ ...prev, enableUrlContext: !(prev.enableUrlContext ?? false) }))}
+            className={`rounded-lg border px-3 py-2 text-sm font-semibold transition-colors ${
+              draft.enableUrlContext ?? false
+                ? 'border-emerald-500 bg-emerald-500/15 text-emerald-200'
+                : 'border-slate-700 bg-slate-950 text-slate-400'
+            }`}
+          >
+            URL Context {(draft.enableUrlContext ?? false) ? 'On' : 'Off'}
+          </button>
+        </div>
       </label>
 
       <div className="grid gap-4 md:grid-cols-3">

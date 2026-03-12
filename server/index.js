@@ -143,15 +143,22 @@ app.get('/api/health', (_req, res) => {
 app.post('/api/text', requireAuth, requireTrustedOrigin, textRateLimit, async (req, res) => {
   try {
     const prompt = String(req.body?.prompt || '').trim();
+    const enableGoogleSearch = req.body?.enableGoogleSearch ?? true;
+    const enableUrlContext = req.body?.enableUrlContext ?? false;
     logInfo('api.text', 'generate.start', {
       requestId: req.requestId,
       promptLength: prompt.length,
+      enableGoogleSearch: Boolean(enableGoogleSearch),
+      enableUrlContext: Boolean(enableUrlContext),
     });
     if (!prompt) {
       return res.status(400).json({ message: 'prompt is required' });
     }
 
-    const result = await generateGroundedText(prompt);
+    const result = await generateGroundedText(prompt, {
+      enableGoogleSearch: Boolean(enableGoogleSearch),
+      enableUrlContext: Boolean(enableUrlContext),
+    });
     logInfo('api.text', 'generate.success', {
       requestId: req.requestId,
       textLength: result?.text?.length || 0,

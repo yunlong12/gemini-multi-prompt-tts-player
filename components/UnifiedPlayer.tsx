@@ -4,6 +4,7 @@ import { audioBufferToWavBlob } from '../utils/audioUtils';
 import { manualItemToPlayerItem, scheduledRunToPlayerItem } from '../utils/playerItems';
 import { ItemStatus, PlayerItem, ProcessItem, ScheduleRun } from '../types';
 import { PersistedScheduledRun } from '../utils/storage';
+import { formatPartLabel } from '../utils/ttsChunks';
 type ScheduledAudioLoadState = 'idle' | 'queued' | 'downloading' | 'decoding' | 'cached' | 'error';
 
 interface UnifiedPlayerProps {
@@ -87,6 +88,23 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
   const rafRef = useRef<number | null>(null);
   const sequenceQueueRef = useRef<string[]>([]);
   const sequenceIndexRef = useRef(0);
+  const groupCheckboxRefs = useRef<Record<string, HTMLInputElement | null>>({});
+
+  const getLocalDateKey = (timestamp: number) => {
+    const date = new Date(timestamp);
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
+  const formatDateLabel = (timestamp: number) =>
+    new Date(timestamp).toLocaleDateString(undefined, {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    });
 
   const clearManualPlaybackState = () => {
     setItems((prev) => prev.map((item) => (item.status === ItemStatus.PLAYING ? { ...item, status: ItemStatus.READY } : item)));
@@ -148,8 +166,11 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
       };
     });
 
-  const playerItems = [...manualPlayerItems, ...scheduledPlayerItems].sort((a, b) => b.timestamp - a.timestamp);
+  const playerItems = [...manualPlayerItems, ...scheduledPlayerItems].sort((a, b) => b.timestamp - a.timestamp || (a.partIndex || 1) - (b.partIndex || 1));
   const selectedPlayerItem = selectedPlayerItemId ? playerItems.find((item) => item.id === selectedPlayerItemId) || null : null;
+  const selectedPlayerTitle = selectedPlayerItem
+    ? `${selectedPlayerItem.promptText || selectedPlayerItem.title}${formatPartLabel(selectedPlayerItem.partIndex, selectedPlayerItem.partCount) ? ` (${formatPartLabel(selectedPlayerItem.partIndex, selectedPlayerItem.partCount)})` : ''}`
+    : 'Nothing selected';
   const selectedPlayerCanPlay = Boolean(
     selectedPlayerItem &&
       (selectedPlayerItem.source === 'manual' ? selectedPlayerItem.audioBuffer : selectedPlayerItem.audioUrl) &&
@@ -165,6 +186,39 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
       return next;
     });
   }, [playerItems]);
+
+  const playerGroups = playerItems.reduce<Array<{
+    key: string;
+    label: string;
+    timestamp: number;
+    items: PlayerItem[];
+  }>>((groups, item) => {
+    const key = getLocalDateKey(item.timestamp);
+    const existing = groups[groups.length - 1];
+    if (existing && existing.key === key) {
+      existing.items.push(item);
+      return groups;
+    }
+
+    groups.push({
+      key,
+      label: formatDateLabel(item.timestamp),
+      timestamp: item.timestamp,
+      items: [item],
+    });
+    return groups;
+  }, []);
+
+  useEffect(() => {
+    playerGroups.forEach((group) => {
+      const checkbox = groupCheckboxRefs.current[group.key];
+      if (!checkbox) {
+        return;
+      }
+      const selectedCount = group.items.filter((item) => checkedPlayerItemIds[item.id] ?? true).length;
+      checkbox.indeterminate = selectedCount > 0 && selectedCount < group.items.length;
+    });
+  }, [playerGroups, checkedPlayerItemIds]);
 
   useEffect(() => {
     if (selectedPlayerItemId && !playerItems.some((item) => item.id === selectedPlayerItemId)) {
@@ -386,64 +440,101 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
         </div>
         {!playerItems.length && <p className="text-sm text-slate-500">No playable audio yet. Generate a manual result or run a schedule.</p>}
         <div className="space-y-2 max-h-[520px] overflow-y-auto pr-1">
-          {playerItems.map((item) => (
-            <div
-              key={item.id}
-              className={`rounded-md border transition-colors ${
-                currentlyPlayingPlayerItemId === item.id
-                  ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-100'
-                  : selectedPlayerItemId === item.id
-                    ? 'border-blue-500/60 bg-blue-500/10 text-blue-100'
-                    : 'border-slate-800 bg-slate-800/50 text-slate-300 hover:border-slate-700'
-              }`}
-            >
-              <label className="flex items-start gap-3 px-3 py-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={checkedPlayerItemIds[item.id] ?? true}
-                  onChange={(e) => {
-                    e.stopPropagation();
-                    setCheckedPlayerItemIds((prev) => ({
-                      ...prev,
-                      [item.id]: e.target.checked,
-                    }));
-                  }}
-                  className="mt-1 h-4 w-4 accent-emerald-500"
-                />
-                <button
-                  type="button"
-                  onClick={() => void selectPlayerItem(item)}
-                  className="flex-1 min-w-0 text-left"
-                >
-                  <div className="flex items-start justify-between gap-2 mb-1">
-                    <span className="text-sm font-semibold line-clamp-2">{item.title}</span>
-                    <span
-                      className={`shrink-0 text-[10px] uppercase tracking-wide px-2 py-1 rounded-full ${
-                        item.source === 'manual'
-                          ? 'bg-blue-950/40 text-blue-300 border border-blue-900/40'
-                          : 'bg-emerald-950/40 text-emerald-300 border border-emerald-900/40'
-                      }`}
-                    >
-                      {sourceLabel(item.source)}
-                    </span>
-                  </div>
-                  <div className="text-xs text-slate-500">{formatPlayerTimestamp(item.timestamp)}</div>
-                  {item.source === 'scheduled' && item.status !== 'playing' && item.status !== 'ready' && (
-                    <div className={`text-xs mt-1 ${scheduledStatusTone(item.status === 'error' ? 'error' : item.status)}`}>
-                      {item.status === 'error' ? item.error || 'Audio unavailable' : scheduledStatusLabel(item.status)}
+          {playerGroups.map((group) => {
+            const selectedCount = group.items.filter((item) => checkedPlayerItemIds[item.id] ?? true).length;
+            const allSelected = group.items.length > 0 && selectedCount === group.items.length;
+
+            return (
+              <div key={group.key} className="space-y-2">
+                <div className="flex items-center justify-between rounded-md border border-slate-800 bg-slate-950/50 px-3 py-2">
+                  <div className="flex items-center gap-3">
+                    <input
+                      ref={(node) => {
+                        groupCheckboxRefs.current[group.key] = node;
+                      }}
+                      type="checkbox"
+                      checked={allSelected}
+                      onChange={(event) => {
+                        const checked = event.target.checked;
+                        setCheckedPlayerItemIds((prev) => {
+                          const next = { ...prev };
+                          group.items.forEach((item) => {
+                            next[item.id] = checked;
+                          });
+                          return next;
+                        });
+                      }}
+                      className="h-4 w-4 accent-emerald-500"
+                    />
+                    <div>
+                      <div className="text-sm font-semibold text-slate-200">{group.label}</div>
+                      <div className="text-xs text-slate-500">{group.items.length} item(s)</div>
                     </div>
-                  )}
-                </button>
-              </label>
-            </div>
-          ))}
+                  </div>
+                  <div className="text-xs text-slate-400">{selectedCount} selected</div>
+                </div>
+
+                {group.items.map((item) => (
+                  <div
+                    key={item.id}
+                    className={`rounded-md border transition-colors ${
+                      currentlyPlayingPlayerItemId === item.id
+                        ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-100'
+                        : selectedPlayerItemId === item.id
+                          ? 'border-blue-500/60 bg-blue-500/10 text-blue-100'
+                          : 'border-slate-800 bg-slate-800/50 text-slate-300 hover:border-slate-700'
+                    }`}
+                  >
+                    <label className="flex items-start gap-3 px-3 py-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={checkedPlayerItemIds[item.id] ?? true}
+                        onChange={(e) => {
+                          e.stopPropagation();
+                          setCheckedPlayerItemIds((prev) => ({
+                            ...prev,
+                            [item.id]: e.target.checked,
+                          }));
+                        }}
+                        className="mt-1 h-4 w-4 accent-emerald-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void selectPlayerItem(item)}
+                        className="flex-1 min-w-0 text-left"
+                      >
+                        <div className="flex items-start justify-between gap-2 mb-1">
+                          <span className="text-sm font-semibold line-clamp-2">{item.title}</span>
+                          <span
+                            className={`shrink-0 text-[10px] uppercase tracking-wide px-2 py-1 rounded-full ${
+                              item.source === 'manual'
+                                ? 'bg-blue-950/40 text-blue-300 border border-blue-900/40'
+                                : 'bg-emerald-950/40 text-emerald-300 border border-emerald-900/40'
+                            }`}
+                          >
+                            {sourceLabel(item.source)}
+                          </span>
+                        </div>
+                        <div className="text-xs text-slate-500">{formatPlayerTimestamp(item.timestamp)}</div>
+                        {item.source === 'scheduled' && item.status !== 'playing' && item.status !== 'ready' && (
+                          <div className={`text-xs mt-1 ${scheduledStatusTone(item.status === 'error' ? 'error' : item.status)}`}>
+                            {item.status === 'error' ? item.error || 'Audio unavailable' : scheduledStatusLabel(item.status)}
+                          </div>
+                        )}
+                      </button>
+                    </label>
+                  </div>
+                ))}
+              </div>
+            );
+          })}
         </div>
       </div>
 
       <div className="bg-slate-900 rounded-lg border border-slate-800 p-6 flex flex-col gap-4">
         <div>
           <p className="text-xs uppercase tracking-wide text-slate-500">Now Selected</p>
-          <h3 className="text-lg font-semibold text-white">{selectedPlayerItem?.title || 'Nothing selected'}</h3>
+          <h3 className="text-lg font-semibold text-white break-words">{selectedPlayerTitle}</h3>
           {selectedPlayerItem && <div className="text-sm text-slate-400 mt-2">{sourceLabel(selectedPlayerItem.source)} | {formatPlayerTimestamp(selectedPlayerItem.timestamp)}</div>}
         </div>
 

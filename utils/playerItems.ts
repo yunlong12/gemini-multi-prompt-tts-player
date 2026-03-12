@@ -1,4 +1,5 @@
 import { ItemStatus, PlayerItem, ProcessItem, ScheduleRun } from '../types';
+import { formatPartLabel } from './ttsChunks';
 
 const shorten = (value: string, max = 72) => {
   const text = String(value || '').trim();
@@ -16,11 +17,16 @@ export const manualItemToPlayerItem = (item: ProcessItem): PlayerItem | null => 
     return null;
   }
 
+  const partLabel = formatPartLabel(item.partIndex, item.partCount);
+
   return {
     id: `manual:${item.id}`,
     source: 'manual',
-    title: shorten(item.prompt),
+    title: shorten(partLabel ? `${item.prompt} (${partLabel})` : item.prompt),
     timestamp: item.timestamp,
+    partIndex: item.partIndex,
+    partCount: item.partCount,
+    partGroupId: item.partGroupId,
     status: 'ready',
     promptText: item.prompt,
     bodyText: item.answer || '',
@@ -38,12 +44,16 @@ export const scheduledRunToPlayerItem = (run: ScheduleRun): PlayerItem | null =>
   }
 
   const audioUrl = `/api/artifacts/${encodeURIComponent(run.audioPath)}`;
+  const partLabel = formatPartLabel(run.partIndex, run.partCount);
 
   return {
     id: `scheduled:${run.id}`,
     source: 'scheduled',
-    title: shorten(run.resolvedPrompt || run.generatedText || run.id),
+    title: shorten(partLabel ? `${run.resolvedPrompt || run.generatedText || run.id} (${partLabel})` : (run.resolvedPrompt || run.generatedText || run.id)),
     timestamp: new Date(run.startedAt).getTime(),
+    partIndex: run.partIndex,
+    partCount: run.partCount,
+    partGroupId: run.partGroupId,
     status: 'ready',
     promptText: run.resolvedPrompt || '',
     bodyText: run.generatedText || run.errorMessage || '',

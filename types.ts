@@ -3,6 +3,11 @@ export interface GroundingUrl {
   title: string;
 }
 
+export interface GeminiToolOptions {
+  enableGoogleSearch?: boolean;
+  enableUrlContext?: boolean;
+}
+
 export enum ItemStatus {
   QUEUED = 'QUEUED',
   IDLE = 'IDLE',
@@ -20,6 +25,11 @@ export interface ProcessItem {
   audioBuffer: AudioBuffer | null;
   audioBase64?: string;
   ttsModel?: string;
+  enableGoogleSearch?: boolean;
+  enableUrlContext?: boolean;
+  partIndex?: number;
+  partCount?: number;
+  partGroupId?: string;
   status: ItemStatus;
   groundingLinks: GroundingUrl[];
   error?: string;
@@ -41,6 +51,9 @@ export interface PlayerItem {
   source: PlayerItemSource;
   title: string;
   timestamp: number;
+  partIndex?: number;
+  partCount?: number;
+  partGroupId?: string;
   status: PlayerItemStatus;
   promptText: string;
   bodyText: string;
@@ -59,6 +72,8 @@ export interface Schedule {
   id: string;
   name: string;
   promptTemplate: string;
+  enableGoogleSearch?: boolean;
+  enableUrlContext?: boolean;
   enabled: boolean;
   timezone: string;
   frequency: ScheduleFrequency;
@@ -89,6 +104,9 @@ export interface ScheduleRun {
   textPath?: string;
   audioDownloadUrl?: string;
   errorMessage?: string;
+  partIndex?: number;
+  partCount?: number;
+  partGroupId?: string;
 }
 
 export interface AuthSession {

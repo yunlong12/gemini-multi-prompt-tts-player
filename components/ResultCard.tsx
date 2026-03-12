@@ -1,6 +1,7 @@
 import React from 'react';
 import { Loader2, CheckCircle, AlertCircle, Volume2, Globe, Clock3 } from 'lucide-react';
 import { ItemStatus, ProcessItem } from '../types';
+import { formatPartLabel } from '../utils/ttsChunks';
 
 interface ResultCardProps {
   item: ProcessItem;
@@ -8,6 +9,7 @@ interface ResultCardProps {
 }
 
 export const ResultCard: React.FC<ResultCardProps> = ({ item, isActive }) => {
+  const partLabel = formatPartLabel(item.partIndex, item.partCount);
   const getStatusIcon = () => {
     switch (item.status) {
       case ItemStatus.QUEUED:
@@ -39,8 +41,15 @@ export const ResultCard: React.FC<ResultCardProps> = ({ item, isActive }) => {
         <h3 className="font-semibold text-lg text-slate-200 pr-4">
           {item.prompt}
         </h3>
-        <div className="text-xs font-mono bg-slate-900 px-3 py-1 rounded-full border border-slate-700 whitespace-nowrap">
-          {getStatusIcon()}
+        <div className="flex flex-col items-end gap-2">
+          {partLabel && (
+            <div className="text-[10px] font-semibold uppercase tracking-wide bg-slate-950 px-3 py-1 rounded-full border border-slate-700 text-slate-300 whitespace-nowrap">
+              {partLabel}
+            </div>
+          )}
+          <div className="text-xs font-mono bg-slate-900 px-3 py-1 rounded-full border border-slate-700 whitespace-nowrap">
+            {getStatusIcon()}
+          </div>
         </div>
       </div>
 

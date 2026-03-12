@@ -1,9 +1,14 @@
 import { GoogleGenAI, Modality } from '@google/genai';
 import { logError, logInfo, logWarn } from '../utils/logger.js';
+import { splitTextForTTS } from '../utils/ttsChunks.js';
 
-const TEXT_MODEL = 'gemini-3-pro-preview';
+const TEXT_MODEL = 'gemini-3.1-pro-preview';
 const DEFAULT_TTS_MODEL = 'gemini-2.5-pro-preview-tts';
 const MAX_TTS_TEXT_LENGTH = Number(process.env.MAX_TTS_TEXT_LENGTH || 4000);
+const DEFAULT_TOOL_OPTIONS = {
+  enableGoogleSearch: true,
+  enableUrlContext: false,
+};
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -61,16 +66,37 @@ export function cleanTextForTTS(text) {
     .trim();
 }
 
-export async function generateGroundedText(prompt) {
-  logInfo('gemini.text', 'request.start', { promptLength: prompt.length, model: TEXT_MODEL });
+function normalizeToolOptions(toolOptions = {}) {
+  return {
+    enableGoogleSearch: toolOptions.enableGoogleSearch ?? DEFAULT_TOOL_OPTIONS.enableGoogleSearch,
+    enableUrlContext: toolOptions.enableUrlContext ?? DEFAULT_TOOL_OPTIONS.enableUrlContext,
+  };
+}
+
+function buildGeminiTools(toolOptions = {}) {
+  const normalized = normalizeToolOptions(toolOptions);
+  const tools = [];
+
+  if (normalized.enableUrlContext) {
+    tools.push({ urlContext: {} });
+  }
+  if (normalized.enableGoogleSearch) {
+    tools.push({ googleSearch: {} });
+  }
+
+  return tools;
+}
+
+export async function generateGroundedText(prompt, toolOptions = {}) {
+  const normalizedToolOptions = normalizeToolOptions(toolOptions);
+  const tools = buildGeminiTools(normalizedToolOptions);
+  logInfo('gemini.text', 'request.start', { promptLength: prompt.length, model: TEXT_MODEL, ...normalizedToolOptions });
   const ai = getAI();
   const response = await retryWithBackoff(() =>
     ai.models.generateContent({
       model: TEXT_MODEL,
       contents: prompt,
-      config: {
-        tools: [{ googleSearch: {} }],
-      },
+      config: tools.length > 0 ? { tools } : undefined,
     })
   );
 
@@ -97,7 +123,7 @@ export async function generateSpeechBase64(text, model = DEFAULT_TTS_MODEL) {
   const cleanedText = cleanTextForTTS(text);
   const boundedText =
     cleanedText.length > MAX_TTS_TEXT_LENGTH
-      ? `${cleanedText.slice(0, MAX_TTS_TEXT_LENGTH)}...`
+      ? splitTextForTTS(cleanedText, MAX_TTS_TEXT_LENGTH)[0]?.text || cleanedText.slice(0, MAX_TTS_TEXT_LENGTH)
       : cleanedText;
   const promptWithStyle = `Read aloud very slowly in a warm and friendly tone: ${boundedText}`;
   logInfo('gemini.tts', 'request.start', {
@@ -108,20 +134,32 @@ export async function generateSpeechBase64(text, model = DEFAULT_TTS_MODEL) {
   });
 
   const ai = getAI();
-  const response = await retryWithBackoff(() =>
-    ai.models.generateContent({
-      model,
-      contents: [{ parts: [{ text: promptWithStyle }] }],
-      config: {
-        responseModalities: [Modality.AUDIO],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: 'Zephyr' },
+  let response;
+  try {
+    response = await retryWithBackoff(() =>
+      ai.models.generateContent({
+        model,
+        contents: [{ parts: [{ text: promptWithStyle }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: 'Zephyr' },
+            },
           },
         },
-      },
-    })
-  );
+      })
+    );
+  } catch (error) {
+    logError('gemini.tts', 'request.error', {
+      model,
+      inputLength: text.length,
+      cleanedLength: cleanedText.length,
+      boundedLength: boundedText.length,
+      error,
+    });
+    throw error;
+  }
 
   const audioBase64 = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
   if (!audioBase64) {

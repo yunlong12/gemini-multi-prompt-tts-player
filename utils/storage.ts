@@ -7,6 +7,11 @@ export interface PersistedItem {
   groundingLinks: GroundingUrl[];
   audioBase64?: string;
   ttsModel?: string;
+  enableGoogleSearch?: boolean;
+  enableUrlContext?: boolean;
+  partIndex?: number;
+  partCount?: number;
+  partGroupId?: string;
   error?: string;
   status: string;
   timestamp: number;
@@ -26,6 +31,9 @@ export interface PersistedScheduledRun {
   textPath?: string;
   audioDownloadUrl?: string;
   errorMessage?: string;
+  partIndex?: number;
+  partCount?: number;
+  partGroupId?: string;
   audioWavBase64?: string;
   cacheStatus?: 'queued' | 'downloading' | 'decoding' | 'cached' | 'failed';
   cacheError?: string;

@@ -1,12 +1,16 @@
 import React from 'react';
 import { Download, Link2, PlayCircle } from 'lucide-react';
 import { ScheduleRun } from '../types';
+import { formatPartLabel } from '../utils/ttsChunks';
 
 interface RunHistoryListProps {
   runs: ScheduleRun[];
 }
 
 export const RunHistoryList: React.FC<RunHistoryListProps> = ({ runs }) => {
+  const orderedRuns = [...runs].sort(
+    (a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime() || (a.partIndex || 1) - (b.partIndex || 1)
+  );
   const getAudioUrl = (run: ScheduleRun) => {
     if (run.audioPath) {
       return `/api/artifacts/${encodeURIComponent(run.audioPath)}`;
@@ -31,9 +35,10 @@ export const RunHistoryList: React.FC<RunHistoryListProps> = ({ runs }) => {
 
   return (
     <div className="space-y-3">
-      {runs.map((run) => {
+      {orderedRuns.map((run) => {
         const audioUrl = getAudioUrl(run);
         const textUrl = getTextUrl(run);
+        const partLabel = formatPartLabel(run.partIndex, run.partCount);
 
         return (
           <div key={run.id} className="bg-slate-900 rounded-lg border border-slate-800 p-4 space-y-3">
@@ -45,6 +50,7 @@ export const RunHistoryList: React.FC<RunHistoryListProps> = ({ runs }) => {
                 <div className="text-xs text-slate-500 mt-1">
                   {new Date(run.startedAt).toLocaleString()} | {run.triggeredBy}
                 </div>
+                {partLabel && <div className="mt-2 text-[10px] uppercase tracking-wide text-slate-300">{partLabel}</div>}
               </div>
               <div
                 className={`text-xs font-semibold px-2 py-1 rounded-full ${
