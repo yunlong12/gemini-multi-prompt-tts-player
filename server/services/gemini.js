@@ -29,25 +29,60 @@ const getAI = () => {
 };
 
 export async function retryWithBackoff(operation, retries = 3, delay = 1000) {
-  try {
-    return await operation();
-  } catch (error) {
-    const msg = String(error?.message || '');
-    const status = error?.status || error?.error?.code;
-    const isRetryable =
-      status === 503 ||
-      status === 429 ||
-      msg.includes('503') ||
-      msg.includes('429') ||
-      msg.toLowerCase().includes('overloaded');
+  const retryConfig =
+    typeof retries === 'object'
+      ? {
+          totalAttempts: Math.max(1, retries.totalAttempts ?? 4),
+          delayMs: retries.delayMs ?? 1000,
+          onAttemptStart: retries.onAttemptStart,
+          onAttemptSuccess: retries.onAttemptSuccess,
+          onAttemptFailure: retries.onAttemptFailure,
+        }
+      : {
+          totalAttempts: Math.max(1, retries + 1),
+          delayMs: delay,
+        };
 
-    if (isRetryable && retries > 0) {
-      logWarn('gemini', 'retry.backoff', { retriesLeft: retries, delayMs: delay, error });
-      await wait(delay);
-      return retryWithBackoff(operation, retries - 1, delay * 2);
+  for (let attempt = 1; attempt <= retryConfig.totalAttempts; attempt += 1) {
+    retryConfig.onAttemptStart?.({ attempt, totalAttempts: retryConfig.totalAttempts });
+    try {
+      const result = await operation();
+      retryConfig.onAttemptSuccess?.({ attempt, totalAttempts: retryConfig.totalAttempts });
+      return result;
+    } catch (error) {
+      const msg = String(error?.message || '');
+      const status = error?.status || error?.error?.code;
+      const isRetryable =
+        status === 503 ||
+        status === 429 ||
+        msg.includes('503') ||
+        msg.includes('429') ||
+        msg.toLowerCase().includes('overloaded');
+      const hasAttemptsLeft = attempt < retryConfig.totalAttempts;
+      const delayMs = retryConfig.delayMs * (2 ** (attempt - 1));
+
+      retryConfig.onAttemptFailure?.({
+        attempt,
+        totalAttempts: retryConfig.totalAttempts,
+        delayMs,
+        error,
+        willRetry: Boolean(isRetryable && hasAttemptsLeft),
+      });
+
+      if (isRetryable && hasAttemptsLeft) {
+        logWarn('gemini', 'retry.backoff', { attempt, totalAttempts: retryConfig.totalAttempts, delayMs, error });
+        await wait(delayMs);
+        continue;
+      }
+
+      logError('gemini', 'retry.give_up', {
+        attempt,
+        totalAttempts: retryConfig.totalAttempts,
+        retryable: isRetryable,
+        error,
+      });
+      throw error;
     }
-    logError('gemini', 'retry.give_up', { retriesLeft: retries, error });
-    throw error;
   }
 }
 
@@ -87,17 +122,19 @@ function buildGeminiTools(toolOptions = {}) {
   return tools;
 }
 
-export async function generateGroundedText(prompt, toolOptions = {}) {
+export async function generateGroundedText(prompt, toolOptions = {}, runtimeOptions = {}) {
   const normalizedToolOptions = normalizeToolOptions(toolOptions);
   const tools = buildGeminiTools(normalizedToolOptions);
   logInfo('gemini.text', 'request.start', { promptLength: prompt.length, model: TEXT_MODEL, ...normalizedToolOptions });
   const ai = getAI();
-  const response = await retryWithBackoff(() =>
-    ai.models.generateContent({
-      model: TEXT_MODEL,
-      contents: prompt,
-      config: tools.length > 0 ? { tools } : undefined,
-    })
+  const response = await retryWithBackoff(
+    () =>
+      ai.models.generateContent({
+        model: TEXT_MODEL,
+        contents: prompt,
+        config: tools.length > 0 ? { tools } : undefined,
+      }),
+    runtimeOptions.retryOptions
   );
 
   const text = response.text || 'No response generated.';
@@ -119,7 +156,7 @@ export async function generateGroundedText(prompt, toolOptions = {}) {
   return { text, groundingLinks };
 }
 
-export async function generateSpeechBase64(text, model = DEFAULT_TTS_MODEL) {
+export async function generateSpeechBase64(text, model = DEFAULT_TTS_MODEL, runtimeOptions = {}) {
   const cleanedText = cleanTextForTTS(text);
   const boundedText =
     cleanedText.length > MAX_TTS_TEXT_LENGTH
@@ -136,19 +173,21 @@ export async function generateSpeechBase64(text, model = DEFAULT_TTS_MODEL) {
   const ai = getAI();
   let response;
   try {
-    response = await retryWithBackoff(() =>
-      ai.models.generateContent({
-        model,
-        contents: [{ parts: [{ text: promptWithStyle }] }],
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: 'Zephyr' },
+    response = await retryWithBackoff(
+      () =>
+        ai.models.generateContent({
+          model,
+          contents: [{ parts: [{ text: promptWithStyle }] }],
+          config: {
+            responseModalities: [Modality.AUDIO],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: 'Zephyr' },
+              },
             },
           },
-        },
-      })
+        }),
+      runtimeOptions.retryOptions
     );
   } catch (error) {
     logError('gemini.tts', 'request.error', {

@@ -155,10 +155,16 @@ app.post('/api/text', requireAuth, requireTrustedOrigin, textRateLimit, async (r
       return res.status(400).json({ message: 'prompt is required' });
     }
 
-    const result = await generateGroundedText(prompt, {
-      enableGoogleSearch: Boolean(enableGoogleSearch),
-      enableUrlContext: Boolean(enableUrlContext),
-    });
+    const result = await generateGroundedText(
+      prompt,
+      {
+        enableGoogleSearch: Boolean(enableGoogleSearch),
+        enableUrlContext: Boolean(enableUrlContext),
+      },
+      {
+        retryOptions: { totalAttempts: 1 },
+      }
+    );
     logInfo('api.text', 'generate.success', {
       requestId: req.requestId,
       textLength: result?.text?.length || 0,
@@ -185,7 +191,9 @@ app.post('/api/tts', requireAuth, requireTrustedOrigin, ttsRateLimit, async (req
       return res.status(400).json({ message: 'text is required' });
     }
 
-    const audioBase64 = await generateSpeechBase64(text, model);
+    const audioBase64 = await generateSpeechBase64(text, model, {
+      retryOptions: { totalAttempts: 1 },
+    });
     logInfo('api.tts', 'generate.success', {
       requestId: req.requestId,
       audioBase64Length: audioBase64?.length || 0,

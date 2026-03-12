@@ -8,10 +8,76 @@ import { logError, logInfo, logWarn } from '../utils/logger.js';
 import { splitTextForTTS } from '../utils/ttsChunks.js';
 
 const LOCK_WINDOW_MS = 15 * 60 * 1000;
+const TOTAL_ATTEMPTS = 4;
+const BASE_RETRY_DELAY_MS = 1000;
 const DEFAULT_TOOL_OPTIONS = {
   enableGoogleSearch: true,
   enableUrlContext: false,
 };
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function runWithAttemptLogging(operation, context) {
+  const {
+    operationType,
+    scheduleId,
+    runId,
+    partIndex,
+    partCount,
+  } = context;
+
+  for (let attempt = 1; attempt <= TOTAL_ATTEMPTS; attempt += 1) {
+    logInfo('scheduleRunner', `${operationType}.attempt.start`, {
+      scheduleId,
+      runId,
+      attempt,
+      totalAttempts: TOTAL_ATTEMPTS,
+      partIndex,
+      partCount,
+    });
+    try {
+      const result = await operation();
+      logInfo('scheduleRunner', `${operationType}.attempt.success`, {
+        scheduleId,
+        runId,
+        attempt,
+        totalAttempts: TOTAL_ATTEMPTS,
+        partIndex,
+        partCount,
+      });
+      return result;
+    } catch (error) {
+      const message = error?.message || 'Unknown error';
+      if (attempt >= TOTAL_ATTEMPTS) {
+        logError('scheduleRunner', `${operationType}.attempt.give_up`, {
+          scheduleId,
+          runId,
+          attempt,
+          totalAttempts: TOTAL_ATTEMPTS,
+          partIndex,
+          partCount,
+          error,
+        });
+        if (operationType === 'text') {
+          throw new Error(`Text generation failed after ${TOTAL_ATTEMPTS} attempts: ${message}`);
+        }
+        throw new Error(`TTS failed for Part ${partIndex}/${partCount} after ${TOTAL_ATTEMPTS} attempts: ${message}`);
+      }
+
+      const delayMs = BASE_RETRY_DELAY_MS * (2 ** (attempt - 1));
+      logWarn('scheduleRunner', `${operationType}.attempt.retry`, {
+        scheduleId,
+        runId,
+        attempt,
+        totalAttempts: TOTAL_ATTEMPTS,
+        delayMs,
+        partIndex,
+        partCount,
+        error,
+      });
+      await wait(delayMs);
+    }
+  }
+}
 
 export async function executeSchedule(schedule, options = {}) {
   const startedAt = new Date().toISOString();
@@ -47,7 +113,17 @@ export async function executeSchedule(schedule, options = {}) {
   });
 
   try {
-    const { text, groundingLinks } = await generateGroundedText(resolvedPrompt, toolOptions);
+    const { text, groundingLinks } = await runWithAttemptLogging(
+      () =>
+        generateGroundedText(resolvedPrompt, toolOptions, {
+          retryOptions: { totalAttempts: 1 },
+        }),
+      {
+        operationType: 'text',
+        scheduleId: schedule.id,
+        runId,
+      }
+    );
     logInfo('scheduleRunner', 'text.generated', {
       scheduleId: schedule.id,
       runId,
@@ -68,7 +144,19 @@ export async function executeSchedule(schedule, options = {}) {
         chunkLength: chunk.text.length,
       });
       try {
-        const audioBase64 = await generateSpeechBase64(chunk.text, schedule.ttsModel);
+        const audioBase64 = await runWithAttemptLogging(
+          () =>
+            generateSpeechBase64(chunk.text, schedule.ttsModel, {
+              retryOptions: { totalAttempts: 1 },
+            }),
+          {
+            operationType: 'audio',
+            scheduleId: schedule.id,
+            runId: chunkRunId,
+            partIndex: chunk.partIndex,
+            partCount: chunk.partCount,
+          }
+        );
         logInfo('scheduleRunner', 'audio.generated', {
           scheduleId: schedule.id,
           runId: chunkRunId,

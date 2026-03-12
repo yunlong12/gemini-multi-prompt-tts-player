@@ -563,8 +563,8 @@ const App: React.FC = () => {
               return next;
             });
             try {
-              addLog(`[TTS] Generating ${partLabel} for "${currentPrompt}".`);
-              const base64Audio = await generateSpeech(partItem.answer || '', modelForItem, addLog);
+              addLog(`[TTS] Starting ${partLabel} for "${currentPrompt}".`);
+              const base64Audio = await generateSpeech(partItem.answer || '', modelForItem, addLog, { contextLabel: partLabel });
               clearRateLimitWarning('tts');
               if (stopProcessingRef.current) {
                 setItems((prev) => {
@@ -578,29 +578,52 @@ const App: React.FC = () => {
                 addLog(`Item deleted before audio decode, skipping "${currentPrompt}" ${partLabel}.`);
                 continue;
               }
+              addLog(`[TTS] ${partLabel} audio received. Decoding...`);
               const audioBuffer = await decodeAudioData(base64Audio, getAudioContext(), addLog);
               setItems((prev) => {
                 const next = prev.map((item) => item.id === partItem.id ? { ...item, audioBuffer, audioBase64: base64Audio, status: ItemStatus.READY } : item);
                 itemsRef.current = next;
                 return next;
               });
+              addLog(`[TTS] ${partLabel} ready.`);
               setSelectedItemId((prev) => prev || partItem.id);
               setPlayerAutoplayRequestId((prev) => prev || `manual:${partItem.id}`);
             } catch (partError: any) {
-              addLog(`Error: ${partError.message}`);
+              const failureMessage = partError?.message || `${partLabel} failed.`;
+              addLog(`[TTS] ${failureMessage}`);
               if (isRateLimitError(partError)) {
                 setRateLimitWarning('tts', 'Daily TTS limit reached: 200 requests per day.');
               }
               setItems((prev) => {
-                const next = prev.map((item) => item.id === partItem.id ? { ...item, status: ItemStatus.ERROR, error: partError.message } : item);
+                const next = prev.map((item) => {
+                  if (item.id === partItem.id) {
+                    return { ...item, status: ItemStatus.ERROR, error: failureMessage };
+                  }
+                  if (
+                    item.partGroupId &&
+                    partItem.partGroupId &&
+                    item.partGroupId === partItem.partGroupId &&
+                    item.status === ItemStatus.QUEUED
+                  ) {
+                    return {
+                      ...item,
+                      status: ItemStatus.ERROR,
+                      error: `Skipped because ${partLabel} failed: ${failureMessage}`,
+                    };
+                  }
+                  return item;
+                });
                 itemsRef.current = next;
                 return next;
               });
+              throw Object.assign(partError instanceof Error ? partError : new Error(failureMessage), { alreadyLogged: true });
             }
           }
           addLog(`Completed "${currentPrompt}".`);
         } catch (error: any) {
-          addLog(`Error: ${error.message}`);
+          if (!error?.alreadyLogged) {
+            addLog(`Error: ${error.message}`);
+          }
           if (isRateLimitError(error)) {
             const warningMessage =
               currentStage === 'text'
@@ -609,6 +632,9 @@ const App: React.FC = () => {
             setRateLimitWarning(currentStage, warningMessage);
           }
           setItems((prev) => {
+            if (currentStage === 'tts') {
+              return prev;
+            }
             const next = prev.map((item) => item.id === currentId ? { ...item, status: ItemStatus.ERROR, error: error.message } : item);
             itemsRef.current = next;
             return next;
