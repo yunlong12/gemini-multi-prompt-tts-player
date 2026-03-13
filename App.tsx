@@ -24,7 +24,7 @@ import {
 } from './services/adminApi';
 import { generateSpeech, generateTextAnswer } from './services/geminiService';
 import { AuthSession, GeminiToolOptions, ItemStatus, ProcessItem, Schedule, SchedulerConfig, ScheduleRun } from './types';
-import { arrayBufferToBase64, base64ToUint8Array, decodeAudioData } from './utils/audioUtils';
+import { arrayBufferToBase64, audioBufferToPcmBase64, base64ToUint8Array, decodeAudioData, mergeAudioBuffers } from './utils/audioUtils';
 import { clearPersistedState, loadPersistedState, PersistedScheduledRun, PersistedState, savePersistedState } from './utils/storage';
 import { formatPartLabel, splitTextForTTS } from './utils/ttsChunks';
 
@@ -116,6 +116,16 @@ const App: React.FC = () => {
   const scheduledPrefetchCycleRef = useRef(0);
 
   const addLog = (msg: string) => setLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
+  const promptSnippet = (value: string, max = 72) => {
+    const text = String(value || '').trim().replace(/\s+/g, ' ');
+    return text.length <= max ? text : `${text.slice(0, max - 3)}...`;
+  };
+  const itemIdLabel = (id: string) => id.slice(0, 8);
+  const logQueue = (msg: string) => addLog(`[Queue] ${msg}`);
+  const logState = (msg: string) => addLog(`[State] ${msg}`);
+  const logPersist = (msg: string) => addLog(`[Persist] ${msg}`);
+  const logCache = (msg: string) => addLog(`[Cache] ${msg}`);
+  const logSelection = (msg: string) => addLog(`[Selection] ${msg}`);
   const isAdminAuthenticated = Boolean(authSession);
   const isUnauthorizedError = (error: unknown) =>
     String((error as Error | undefined)?.message || '').toLowerCase().includes('unauthorized');
@@ -247,11 +257,16 @@ const App: React.FC = () => {
           const persisted = await loadPersistedState();
           if (persisted) {
             addLog(`[Storage] Found persisted state with ${persisted.items?.length || 0} item(s).`);
+            logPersist(`[Hydrate] Starting restore for ${persisted.items?.length || 0} manual item(s) and ${persisted.scheduledRuns?.length || 0} scheduled run cache record(s).`);
             const ctx = getAudioContext();
           const hydratedItems: ProcessItem[] = await Promise.all((persisted.items || []).map(async (item) => {
             let audioBuffer: AudioBuffer | null = null;
             if (item.audioBase64) {
-              try { audioBuffer = await decodeAudioData(item.audioBase64, ctx, () => {}); } catch {}
+              try {
+                audioBuffer = await decodeAudioData(item.audioBase64, ctx, () => {});
+              } catch {
+                logPersist(`[Hydrate] Failed to decode cached manual audio for ${itemIdLabel(item.id)}.`);
+              }
             }
             let status = item.status as ItemStatus;
             let error = item.error;
@@ -269,6 +284,7 @@ const App: React.FC = () => {
             Object.fromEntries((persisted.scheduledRuns || []).map((run) => [run.id, run]))
           );
           addLog('Loaded saved session from IndexedDB.');
+          logPersist(`[Hydrate] Restore complete. Manual items=${hydratedItems.length}, scheduled runs=${persisted.scheduledRuns?.length || 0}.`);
         }
         if (!persisted) addLog('[Storage] No persisted state found.');
       } catch (e: any) {
@@ -288,7 +304,13 @@ const App: React.FC = () => {
         recentPrompts: [],
         updatedAt: Date.now(),
       };
-      try { await savePersistedState(state); } catch (e: any) { addLog(`Persistence Error: ${e.message || e}`); }
+      try {
+        logPersist(`[Save] Persisting ${state.items.length} manual item(s) and ${state.scheduledRuns.length} scheduled run cache record(s).`);
+        await savePersistedState(state);
+        logPersist(`[Save] Persist completed successfully at ${new Date(state.updatedAt).toLocaleTimeString()}.`);
+      } catch (e: any) {
+        addLog(`Persistence Error: ${e.message || e}`);
+      }
     }, 1000);
     return () => clearTimeout(timeout);
   }, [items, isHydrating, persistedScheduledRuns]);
@@ -309,18 +331,22 @@ const App: React.FC = () => {
     const matchingRun = runs.find((run) => run.id === runId) || persistedScheduledRuns[runId];
     const audioPath = 'audioPath' in (matchingRun || {}) ? matchingRun?.audioPath : undefined;
     if (!audioPath) {
+      logCache(`[Scheduled] No audioPath available for run ${runId.slice(0, 8)}.`);
       return null;
     }
     if (scheduledAudioBuffersById[playerItemId]) {
+      logCache(`[Scheduled] Memory cache hit for ${playerItemId.slice(0, 12)}.`);
       return scheduledAudioBuffersById[playerItemId];
     }
     if (scheduledAudioLoadPromisesRef.current[playerItemId]) {
+      logCache(`[Scheduled] Reusing in-flight load for ${playerItemId.slice(0, 12)}.`);
       return scheduledAudioLoadPromisesRef.current[playerItemId];
     }
 
     const promise = (async () => {
       try {
         addLog(`[Player] Loading scheduled audio for ${playerItemId.slice(0, 12)}.`);
+        logCache(`[Scheduled] Fetch started for path "${audioPath}".`);
         setScheduledAudioLoadStateById((prev) => ({ ...prev, [playerItemId]: 'downloading' }));
         setScheduledAudioErrorsById((prev) => {
           const next = { ...prev };
@@ -341,6 +367,7 @@ const App: React.FC = () => {
           throw new Error(`HTTP ${response.status}`);
         }
         const arrayBuffer = await response.arrayBuffer();
+        logCache(`[Scheduled] Download complete for ${playerItemId.slice(0, 12)} (${arrayBuffer.byteLength} bytes).`);
         setScheduledAudioLoadStateById((prev) => ({ ...prev, [playerItemId]: 'decoding' }));
         setPersistedScheduledRuns((prev) => ({
           ...prev,
@@ -366,6 +393,7 @@ const App: React.FC = () => {
           },
         }));
         addLog(`[Player] Scheduled audio ready (${decoded.duration.toFixed(2)}s).`);
+        logCache(`[Scheduled] Cached decoded audio for ${playerItemId.slice(0, 12)} (${decoded.duration.toFixed(2)}s).`);
         return decoded;
       } catch (error: any) {
         const message = error?.message || 'Failed to load scheduled audio';
@@ -381,6 +409,7 @@ const App: React.FC = () => {
           },
         }));
         addLog(`[Player] Scheduled audio load failed: ${message}`);
+        logCache(`[Scheduled] Fetch/decode failed for ${playerItemId.slice(0, 12)}: ${message}`);
         return null;
       } finally {
         delete scheduledAudioLoadPromisesRef.current[playerItemId];
@@ -403,6 +432,7 @@ const App: React.FC = () => {
 
       const promise = (async () => {
         try {
+          logCache(`[Scheduled] Restoring local cached WAV for ${playerItemId.slice(0, 12)}.`);
           setScheduledAudioLoadStateById((prev) => ({ ...prev, [playerItemId]: 'decoding' }));
           const bytes = base64ToUint8Array(persistedRun.audioWavBase64!);
           const decoded = await getAudioContext().decodeAudioData(bytes.buffer.slice(0));
@@ -417,6 +447,7 @@ const App: React.FC = () => {
             },
           }));
           addLog(`[Player] Restored scheduled audio from local cache for ${playerItemId.slice(0, 12)}.`);
+          logCache(`[Scheduled] Local cache restore complete for ${playerItemId.slice(0, 12)} (${decoded.duration.toFixed(2)}s).`);
         } catch (error: any) {
           setScheduledAudioLoadStateById((prev) => ({ ...prev, [playerItemId]: 'error' }));
           setScheduledAudioErrorsById((prev) => ({ ...prev, [playerItemId]: error?.message || 'Failed to restore cached audio' }));
@@ -428,6 +459,7 @@ const App: React.FC = () => {
               cacheError: error?.message || 'Failed to restore cached audio',
             },
           }));
+          logCache(`[Scheduled] Local cache restore failed for ${playerItemId.slice(0, 12)}: ${error?.message || error}`);
         } finally {
           delete scheduledAudioHydrationRef.current[playerItemId];
         }
@@ -481,13 +513,16 @@ const App: React.FC = () => {
     scheduledPrefetchRunningRef.current = true;
     scheduledPrefetchCycleRef.current += 1;
     addLog(`[Player] Prefetch queue started for ${missingRuns.length} scheduled audio item(s), top to bottom.`);
+    logCache(`[Prefetch] Cycle ${scheduledPrefetchCycleRef.current} queued ${missingRuns.length} scheduled audio item(s).`);
     void (async () => {
       for (const run of missingRuns) {
         const playerItemId = `scheduled:${run.id}`;
         scheduledPrefetchedIdsRef.current[playerItemId] = true;
+        logCache(`[Prefetch] Loading ${playerItemId.slice(0, 12)}.`);
         await loadScheduledRunAudio(run.id);
       }
       addLog('[Player] Scheduled audio prefetch finished.');
+      logCache(`[Prefetch] Cycle ${scheduledPrefetchCycleRef.current} finished.`);
       scheduledPrefetchRunningRef.current = false;
     })();
   }, [runs, persistedScheduledRuns, scheduledAudioBuffersById]);
@@ -495,19 +530,27 @@ const App: React.FC = () => {
     if (isWorkerRunningRef.current) return;
     isWorkerRunningRef.current = true;
     setIsProcessingActive(true);
+    logQueue(`Worker started with ${processingQueueRef.current.length} queued item(s).`);
     try {
       while (processingQueueRef.current.length > 0) {
         if (stopProcessingRef.current) { addLog(`Worker halted. ${processingQueueRef.current.length} queued item(s) remain.`); break; }
         const currentId = processingQueueRef.current.shift();
         if (!currentId) continue;
+        logQueue(`Dequeued item ${itemIdLabel(currentId)}. Remaining queue length: ${processingQueueRef.current.length}.`);
         let currentItem = itemsRef.current.find((item) => item.id === currentId);
-        if (!currentItem) { await wait(0); currentItem = itemsRef.current.find((item) => item.id === currentId); }
+        if (!currentItem) {
+          logQueue(`Item ${itemIdLabel(currentId)} missing on first lookup, retrying after micro-wait.`);
+          await wait(0);
+          currentItem = itemsRef.current.find((item) => item.id === currentId);
+        }
         if (!currentItem) { addLog(`Skipping removed item ${currentId.slice(0, 8)}.`); continue; }
         const currentPrompt = currentItem.prompt;
         const modelForItem = currentItem.ttsModel || DEFAULT_TTS_MODEL;
         let currentStage: RateLimitScope = 'text';
         addLog(`Processing "${currentPrompt}" (${processingQueueRef.current.length} queued after this).`);
+        logQueue(`Processing item ${itemIdLabel(currentId)} prompt="${promptSnippet(currentPrompt)}".`);
         setItems((prev) => prev.map((item) => item.id === currentId ? { ...item, status: ItemStatus.GENERATING_TEXT, error: undefined } : item));
+        logState(`Item ${itemIdLabel(currentId)} status -> ${ItemStatus.GENERATING_TEXT}.`);
         try {
           const { text, groundingLinks } = await generateTextAnswer(
             currentPrompt,
@@ -518,76 +561,66 @@ const App: React.FC = () => {
             addLog
           );
           clearRateLimitWarning('text');
+          logState(`Text ready for ${itemIdLabel(currentId)}. Length=${text.length}, sources=${groundingLinks.length}.`);
           if (stopProcessingRef.current) {
             setItems((prev) => {
               const next = prev.map((item) => item.id === currentId ? { ...item, status: ItemStatus.ERROR, error: 'Stopped by user.' } : item);
               itemsRef.current = next;
               return next;
             });
+            logState(`Item ${itemIdLabel(currentId)} stopped by user during text stage.`);
             break;
           }
           if (!itemsRef.current.some((item) => item.id === currentId)) { addLog(`Item deleted during processing, skipping "${currentPrompt}".`); continue; }
           currentStage = 'tts';
           const ttsChunks = splitTextForTTS(text);
-          const partGroupId = ttsChunks.length > 1 ? uuidv4() : currentId;
-          const chunkedItems: ProcessItem[] = ttsChunks.map((chunk, index) => ({
-            id: index === 0 ? currentId : uuidv4(),
-            prompt: currentPrompt,
-            answer: chunk.text,
-            audioBuffer: null,
-            audioBase64: undefined,
-            ttsModel: modelForItem,
-            enableGoogleSearch: currentItem.enableGoogleSearch ?? DEFAULT_TOOL_OPTIONS.enableGoogleSearch,
-            enableUrlContext: currentItem.enableUrlContext ?? DEFAULT_TOOL_OPTIONS.enableUrlContext,
-            partIndex: chunk.partIndex,
-            partCount: chunk.partCount,
-            partGroupId,
-            status: ItemStatus.QUEUED,
-            groundingLinks,
-            timestamp: currentItem.timestamp,
-          }));
           setItems((prev) => {
-            const next = prev.flatMap((item) => item.id === currentId ? chunkedItems : [item]);
+            const next = prev.map((item) => item.id === currentId ? {
+              ...item,
+              answer: text,
+              groundingLinks,
+              status: ItemStatus.GENERATING_AUDIO,
+              error: undefined,
+              partIndex: undefined,
+              partCount: undefined,
+              partGroupId: undefined,
+            } : item);
             itemsRef.current = next;
             return next;
           });
-          if (chunkedItems.length > 1) {
-            addLog(`[TTS] Split long text into ${chunkedItems.length} part(s) for "${currentPrompt}".`);
+          logState(`Item ${itemIdLabel(currentId)} status -> ${ItemStatus.GENERATING_AUDIO}. Chunk count=${ttsChunks.length}.`);
+          if (ttsChunks.length > 1) {
+            addLog(`[TTS] Split long text into ${ttsChunks.length} part(s) for "${currentPrompt}".`);
           }
+          logQueue(`Item ${itemIdLabel(currentId)} registered ${ttsChunks.length} internal chunk(s).`);
 
-          for (const partItem of chunkedItems) {
-            const partLabel = formatPartLabel(partItem.partIndex, partItem.partCount) || 'single part';
-            setItems((prev) => {
-              const next = prev.map((item) => item.id === partItem.id ? { ...item, status: ItemStatus.GENERATING_AUDIO, error: undefined } : item);
-              itemsRef.current = next;
-              return next;
-            });
+          const decodedChunks: AudioBuffer[] = [];
+          for (const chunk of ttsChunks) {
+            const partLabel = formatPartLabel(chunk.partIndex, chunk.partCount) || 'single part';
             try {
               addLog(`[TTS] Starting ${partLabel} for "${currentPrompt}".`);
-              const base64Audio = await generateSpeech(partItem.answer || '', modelForItem, addLog, { contextLabel: partLabel });
+              logState(`Chunk ${partLabel} started for item ${itemIdLabel(currentId)}. Text length=${chunk.text.length}.`);
+              const base64Audio = await generateSpeech(chunk.text, modelForItem, addLog, { contextLabel: partLabel });
               clearRateLimitWarning('tts');
               if (stopProcessingRef.current) {
                 setItems((prev) => {
-                  const next = prev.map((item) => item.id === partItem.id ? { ...item, status: ItemStatus.ERROR, error: 'Stopped by user.' } : item);
+                  const next = prev.map((item) => item.id === currentId ? { ...item, status: ItemStatus.ERROR, error: 'Stopped by user.' } : item);
                   itemsRef.current = next;
                   return next;
                 });
-                break;
+                logState(`Item ${itemIdLabel(currentId)} stopped by user during ${partLabel}.`);
+                throw Object.assign(new Error('Stopped by user.'), { alreadyLogged: true });
               }
-              if (!itemsRef.current.some((item) => item.id === partItem.id)) {
+              if (!itemsRef.current.some((item) => item.id === currentId)) {
                 addLog(`Item deleted before audio decode, skipping "${currentPrompt}" ${partLabel}.`);
-                continue;
+                throw Object.assign(new Error(`Item ${itemIdLabel(currentId)} deleted during ${partLabel}.`), { alreadyLogged: true });
               }
               addLog(`[TTS] ${partLabel} audio received. Decoding...`);
+              logState(`Chunk ${partLabel} received ${base64Audio.length} base64 chars. Starting decode.`);
               const audioBuffer = await decodeAudioData(base64Audio, getAudioContext(), addLog);
-              setItems((prev) => {
-                const next = prev.map((item) => item.id === partItem.id ? { ...item, audioBuffer, audioBase64: base64Audio, status: ItemStatus.READY } : item);
-                itemsRef.current = next;
-                return next;
-              });
               addLog(`[TTS] ${partLabel} ready.`);
-              setSelectedItemId((prev) => prev || partItem.id);
-              setPlayerAutoplayRequestId((prev) => prev || `manual:${partItem.id}`);
+              logState(`Chunk ${partLabel} decoded. Duration=${audioBuffer.duration.toFixed(2)}s.`);
+              decodedChunks.push(audioBuffer);
             } catch (partError: any) {
               const failureMessage = partError?.message || `${partLabel} failed.`;
               addLog(`[TTS] ${failureMessage}`);
@@ -595,30 +628,38 @@ const App: React.FC = () => {
                 setRateLimitWarning('tts', 'Daily TTS limit reached: 200 requests per day.');
               }
               setItems((prev) => {
-                const next = prev.map((item) => {
-                  if (item.id === partItem.id) {
-                    return { ...item, status: ItemStatus.ERROR, error: failureMessage };
-                  }
-                  if (
-                    item.partGroupId &&
-                    partItem.partGroupId &&
-                    item.partGroupId === partItem.partGroupId &&
-                    item.status === ItemStatus.QUEUED
-                  ) {
-                    return {
-                      ...item,
-                      status: ItemStatus.ERROR,
-                      error: `Skipped because ${partLabel} failed: ${failureMessage}`,
-                    };
-                  }
-                  return item;
-                });
+                const next = prev.map((item) => item.id === currentId ? { ...item, status: ItemStatus.ERROR, error: failureMessage } : item);
                 itemsRef.current = next;
                 return next;
               });
+              logState(`Item ${itemIdLabel(currentId)} status -> ${ItemStatus.ERROR}. Failed during ${partLabel}.`);
               throw Object.assign(partError instanceof Error ? partError : new Error(failureMessage), { alreadyLogged: true });
             }
           }
+          addLog(`[Merge] Starting merge for ${decodedChunks.length} chunk(s) for "${currentPrompt}".`);
+          const mergedAudioBuffer = mergeAudioBuffers(getAudioContext(), decodedChunks, addLog);
+          const mergedAudioBase64 = audioBufferToPcmBase64(mergedAudioBuffer);
+          logState(`Merge complete for item ${itemIdLabel(currentId)}. Duration=${mergedAudioBuffer.duration.toFixed(2)}s, PCM base64 length=${mergedAudioBase64.length}.`);
+          setItems((prev) => {
+            const next = prev.map((item) => item.id === currentId ? {
+              ...item,
+              answer: text,
+              groundingLinks,
+              audioBuffer: mergedAudioBuffer,
+              audioBase64: mergedAudioBase64,
+              status: ItemStatus.READY,
+              error: undefined,
+              partIndex: undefined,
+              partCount: undefined,
+              partGroupId: undefined,
+            } : item);
+            itemsRef.current = next;
+            return next;
+          });
+          logState(`Item ${itemIdLabel(currentId)} status -> ${ItemStatus.READY}.`);
+          logSelection(`Selecting merged manual item ${itemIdLabel(currentId)} for autoplay.`);
+          setSelectedItemId((prev) => prev || currentId);
+          setPlayerAutoplayRequestId((prev) => prev || `manual:${currentId}`);
           addLog(`Completed "${currentPrompt}".`);
         } catch (error: any) {
           if (!error?.alreadyLogged) {
@@ -639,12 +680,14 @@ const App: React.FC = () => {
             itemsRef.current = next;
             return next;
           });
+          logState(`Item ${itemIdLabel(currentId)} failed in stage ${currentStage}: ${error.message}`);
         }
       }
     } finally {
       isWorkerRunningRef.current = false;
       setIsProcessingActive(false);
       stopProcessingRef.current = false;
+      logQueue('Worker stopped.');
     }
   };
 
@@ -662,6 +705,10 @@ const App: React.FC = () => {
     itemsRef.current = [...newItems, ...itemsRef.current];
     setItems((prev) => [...newItems, ...prev]);
     addLog(`Enqueued ${newItems.length} prompt(s) with ${ttsModel}. Tools: googleSearch=${normalizedToolOptions.enableGoogleSearch}, urlContext=${normalizedToolOptions.enableUrlContext}. Queue length: ${processingQueueRef.current.length}.`);
+    newItems.forEach((item, index) => {
+      logQueue(`Enqueued item ${itemIdLabel(item.id)} at queue position ${processingQueueRef.current.length - newItems.length + index + 1}. Prompt="${promptSnippet(item.prompt)}".`);
+      logState(`Item ${itemIdLabel(item.id)} status -> ${ItemStatus.QUEUED}.`);
+    });
     if (!isWorkerRunningRef.current) void runQueueWorker();
   };
 
@@ -858,6 +905,7 @@ const App: React.FC = () => {
 
   const resetAll = () => {
     addLog('[UI] Clearing full session state (results/logs/player queue).');
+    logState(`Reset requested. items=${itemsRef.current.length}, queued=${processingQueueRef.current.length}, persistedRuns=${Object.keys(persistedScheduledRuns).length}.`);
     stopProcessingRef.current = true;
     processingQueueRef.current = [];
     isWorkerRunningRef.current = false;

@@ -119,6 +119,10 @@ export const generateTextAnswer = async (
         const message = typeof payload === 'string' ? payload : payload?.message;
         throw toApiError(message || `HTTP ${response.status}`, response.status);
       }
+      const nextText = typeof payload === 'object' && typeof payload?.text === 'string' ? payload.text.trim() : '';
+      if (!nextText) {
+        throw toApiError('Empty text response from model');
+      }
       return payload;
     }, {
       stage: 'Text',
@@ -128,7 +132,10 @@ export const generateTextAnswer = async (
       finalMessage: (cause, totalAttempts) => `Text generation failed after ${totalAttempts} attempts: ${cause}`,
     });
 
-    const text = typeof data === 'object' && data?.text ? data.text : "No response generated.";
+    const text = typeof data === 'object' && typeof data?.text === 'string' ? data.text.trim() : '';
+    if (!text) {
+      throw toApiError('Empty text response from model');
+    }
     const groundingLinks = typeof data === 'object' && Array.isArray(data?.groundingLinks) ? data.groundingLinks : [];
     log(`[Text] Response received. Text length: ${text.length} chars.`);
 

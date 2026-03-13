@@ -137,7 +137,15 @@ export async function generateGroundedText(prompt, toolOptions = {}, runtimeOpti
     runtimeOptions.retryOptions
   );
 
-  const text = response.text || 'No response generated.';
+  const text = String(response.text || '').trim();
+  if (!text) {
+    logError('gemini.text', 'request.empty_text', {
+      promptLength: prompt.length,
+      model: TEXT_MODEL,
+      ...normalizedToolOptions,
+    });
+    throw new Error('Empty text response from model');
+  }
   const groundingLinks = [];
   const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
 

@@ -19,6 +19,16 @@ export const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
   return window.btoa(binary);
 };
 
+export const uint8ArrayToBase64 = (bytes: Uint8Array): string => {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return window.btoa(binary);
+};
+
 // Decodes raw PCM audio data manually
 // Gemini TTS returns raw PCM 16-bit, 24kHz, Mono
 export const decodeAudioData = async (
@@ -61,6 +71,60 @@ export const decodeAudioData = async (
     console.error(e);
     throw e;
   }
+};
+
+export const mergeAudioBuffers = (
+  audioContext: AudioContext,
+  buffers: AudioBuffer[],
+  log: (msg: string) => void
+): AudioBuffer => {
+  if (!buffers.length) {
+    throw new Error('No audio buffers to merge');
+  }
+
+  const sampleRate = buffers[0].sampleRate;
+  const numberOfChannels = buffers[0].numberOfChannels;
+  const totalLength = buffers.reduce((sum, buffer) => {
+    if (buffer.sampleRate !== sampleRate) {
+      throw new Error(`Sample rate mismatch while merging audio: expected ${sampleRate}, got ${buffer.sampleRate}`);
+    }
+    if (buffer.numberOfChannels !== numberOfChannels) {
+      throw new Error(`Channel mismatch while merging audio: expected ${numberOfChannels}, got ${buffer.numberOfChannels}`);
+    }
+    return sum + buffer.length;
+  }, 0);
+
+  log(`[Merge] Creating merged AudioBuffer from ${buffers.length} chunk(s), ${totalLength} frames total.`);
+  const merged = audioContext.createBuffer(numberOfChannels, totalLength, sampleRate);
+  let offset = 0;
+
+  for (const [bufferIndex, buffer] of buffers.entries()) {
+    log(`[Merge] Appending chunk ${bufferIndex + 1}/${buffers.length} (${buffer.duration.toFixed(2)}s).`);
+    for (let channel = 0; channel < numberOfChannels; channel += 1) {
+      merged.getChannelData(channel).set(buffer.getChannelData(channel), offset);
+    }
+    offset += buffer.length;
+  }
+
+  log(`[Merge] Audio merge complete. Duration: ${merged.duration.toFixed(2)}s.`);
+  return merged;
+};
+
+export const audioBufferToPcmBase64 = (buffer: AudioBuffer): string => {
+  const numChannels = buffer.numberOfChannels;
+  const pcm = new Int16Array(buffer.length * numChannels);
+  const channels = Array.from({ length: numChannels }, (_, index) => buffer.getChannelData(index));
+  let offset = 0;
+
+  for (let frameIndex = 0; frameIndex < buffer.length; frameIndex += 1) {
+    for (let channel = 0; channel < numChannels; channel += 1) {
+      const sample = Math.max(-1, Math.min(1, channels[channel][frameIndex]));
+      pcm[offset] = sample < 0 ? Math.round(sample * 0x8000) : Math.round(sample * 0x7FFF);
+      offset += 1;
+    }
+  }
+
+  return uint8ArrayToBase64(new Uint8Array(pcm.buffer));
 };
 
 // Convert an AudioBuffer into a WAV Blob (16-bit PCM)

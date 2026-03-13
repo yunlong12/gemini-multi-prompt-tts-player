@@ -187,6 +187,10 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
     });
   }, [playerItems]);
 
+  useEffect(() => {
+    addLog(`[Selection] Player list now has ${playerItems.length} playable item(s).`);
+  }, [playerItems.length]);
+
   const playerGroups = playerItems.reduce<Array<{
     key: string;
     label: string;
@@ -222,6 +226,7 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
 
   useEffect(() => {
     if (selectedPlayerItemId && !playerItems.some((item) => item.id === selectedPlayerItemId)) {
+      addLog(`[Selection] Clearing player selection because ${selectedPlayerItemId.slice(0, 12)} is no longer available.`);
       setSelectedPlayerItemId(null);
       setPlayerDuration(0);
       setPlayerProgress(0);
@@ -311,10 +316,12 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
 
   const selectPlayerItem = async (playerItem: PlayerItem) => {
     resetPlaybackFlags();
+    addLog(`[Selection] Selecting ${playerItem.id.slice(0, 12)} (${sourceLabel(playerItem.source)}).`);
     setSelectedPlayerItemId(playerItem.id);
     if (playerItem.source === 'manual') {
       setSelectedItemId(playerItem.id.slice('manual:'.length));
       setPlayerDuration(playerItem.audioBuffer?.duration || 0);
+      addLog(`[Selection] Manual item selected with duration ${(playerItem.audioBuffer?.duration || 0).toFixed(2)}s.`);
       return;
     }
 
@@ -323,6 +330,7 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
     const buffer = await loadScheduledRunAudio(playerItem.id.replace('scheduled:', ''));
     if (buffer) {
       setPlayerDuration(buffer.duration);
+      addLog(`[Selection] Scheduled item ${playerItem.id.slice(0, 12)} ready after load (${buffer.duration.toFixed(2)}s).`);
     }
   };
 
@@ -393,6 +401,7 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
   };
 
   const handlePause = () => {
+    addLog(`[Audio] Pausing playback at ${playerProgress.toFixed(2)}s.`);
     stopProgressTracking();
     pauseOffsetRef.current = playerProgress;
     stopCurrentSource();
@@ -403,6 +412,7 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
 
   const handleDownloadSelected = () => {
     if (!selectedPlayerItem) return;
+    addLog(`[Player] Download requested for ${selectedPlayerItem.id.slice(0, 12)} (${sourceLabel(selectedPlayerItem.source)}).`);
     if (selectedPlayerItem.source === 'manual') {
       if (!selectedPlayerItem.audioBuffer) return;
       const blob = audioBufferToWavBlob(selectedPlayerItem.audioBuffer);
@@ -427,6 +437,7 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
     if (!autoplayRequestId) return;
     const target = playerItems.find((item) => item.id === autoplayRequestId);
     if (target) {
+      addLog(`[Player] Autoplay request received for ${autoplayRequestId.slice(0, 12)}.`);
       void startPlayback(target.id, 0, false);
     }
     onAutoplayRequestHandled();
@@ -456,6 +467,7 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
                       checked={allSelected}
                       onChange={(event) => {
                         const checked = event.target.checked;
+                        addLog(`[Selection] Date group "${group.label}" toggled to ${checked ? 'checked' : 'unchecked'} (${group.items.length} item(s)).`);
                         setCheckedPlayerItemIds((prev) => {
                           const next = { ...prev };
                           group.items.forEach((item) => {
@@ -491,6 +503,7 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
                         checked={checkedPlayerItemIds[item.id] ?? true}
                         onChange={(e) => {
                           e.stopPropagation();
+                          addLog(`[Selection] Item ${item.id.slice(0, 12)} toggled to ${e.target.checked ? 'checked' : 'unchecked'}.`);
                           setCheckedPlayerItemIds((prev) => ({
                             ...prev,
                             [item.id]: e.target.checked,
@@ -561,6 +574,7 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
           <button
             onClick={() => {
               if (!selectedForPlayAll.length) return;
+              addLog(`[Audio] Play All requested for ${selectedForPlayAll.length} checked item(s).`);
               sequenceQueueRef.current = selectedForPlayAll.map((item) => item.id);
               sequenceIndexRef.current = 0;
               setIsPlayingSequence(true);
@@ -600,6 +614,7 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
             value={Math.min(playerProgress, playerDuration || 0)}
             onChange={(e) => {
               const value = Math.max(0, Math.min(Number(e.target.value), playerDuration || 0));
+              addLog(`[Audio] Seek requested to ${value.toFixed(2)}s.`);
               setPlayerProgress(value);
               pauseOffsetRef.current = value;
               if (isPlayerPlaying && selectedPlayerItemId) {

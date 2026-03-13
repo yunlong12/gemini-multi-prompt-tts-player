@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { generateGroundedText, generateSpeechBase64 } from './gemini.js';
-import { pcmBase64ToWavBuffer } from '../utils/pcmToWav.js';
+import { mergePcmBase64ToWavBuffer } from '../utils/pcmToWav.js';
 import { computeNextRunAt, interpolatePromptTemplate } from '../utils/time.js';
 import { recordRun, tryLockSchedule, updateNextRun } from './scheduleStore.js';
 import { saveAudio, saveTextArtifact } from './resultStore.js';
@@ -131,11 +131,15 @@ export async function executeSchedule(schedule, options = {}) {
       links: groundingLinks.length,
     });
     const ttsChunks = splitTextForTTS(text);
-    const partGroupId = ttsChunks.length > 1 ? crypto.randomUUID() : runId;
-    const recordedRuns = [];
+    logInfo('scheduleRunner', 'audio.chunking.complete', {
+      scheduleId: schedule.id,
+      runId,
+      chunkCount: ttsChunks.length,
+    });
+    const audioChunks = [];
 
     for (const chunk of ttsChunks) {
-      const chunkRunId = chunk.partCount > 1 ? `${partGroupId}-part-${String(chunk.partIndex).padStart(2, '0')}` : runId;
+      const chunkRunId = runId;
       logInfo('scheduleRunner', 'audio.part.start', {
         scheduleId: schedule.id,
         runId: chunkRunId,
@@ -165,91 +169,80 @@ export async function executeSchedule(schedule, options = {}) {
           audioBase64Length: audioBase64.length,
           model: schedule.ttsModel,
         });
-        const wavBuffer = pcmBase64ToWavBuffer(audioBase64);
-        logInfo('scheduleRunner', 'audio.wav_ready', {
+        audioChunks.push(audioBase64);
+        logInfo('scheduleRunner', 'audio.part.buffered', {
           scheduleId: schedule.id,
           runId: chunkRunId,
           partIndex: chunk.partIndex,
           partCount: chunk.partCount,
-          wavBytes: wavBuffer.length,
+          bufferedParts: audioChunks.length,
         });
-        const audioInfo = await saveAudio({
-          scheduleId: schedule.id,
-          runId: chunkRunId,
-          startedAt,
-          outputPrefix: schedule.outputPrefix,
-          wavBuffer,
-        });
-        const finishedAt = new Date().toISOString();
-        const textInfo = await saveTextArtifact({
-          scheduleId: schedule.id,
-          runId: chunkRunId,
-          startedAt,
-          outputPrefix: schedule.outputPrefix,
-          payload: {
-            scheduleId: schedule.id,
-            runId: chunkRunId,
-            startedAt,
-            finishedAt,
-            resolvedPrompt,
-            generatedText: chunk.text,
-            groundingLinks,
-            ttsModel: schedule.ttsModel,
-            toolOptions,
-            partIndex: chunk.partIndex,
-            partCount: chunk.partCount,
-            partGroupId,
-            audioPath: audioInfo.audioPath,
-          },
-        });
-        const run = await recordRun({
-          id: chunkRunId,
-          scheduleId: schedule.id,
-          startedAt,
-          finishedAt,
-          status: 'success',
-          triggeredBy,
-          resolvedPrompt,
-          generatedText: chunk.text,
-          groundingLinks,
-          audioPath: audioInfo.audioPath,
-          textPath: textInfo.textPath,
-          audioDownloadUrl: audioInfo.audioDownloadUrl,
-          errorMessage: '',
-          partIndex: chunk.partIndex,
-          partCount: chunk.partCount,
-          partGroupId,
-        });
-        recordedRuns.push(run);
       } catch (partError) {
-        const finishedAt = new Date().toISOString();
-        const errorMessage = partError?.message || 'Schedule execution failed';
-        await recordRun({
-          id: chunkRunId,
+        logError('scheduleRunner', 'audio.part.error', {
           scheduleId: schedule.id,
-          startedAt,
-          finishedAt,
-          status: 'error',
-          triggeredBy,
-          resolvedPrompt,
-          generatedText: chunk.text,
-          groundingLinks,
-          audioPath: '',
-          textPath: '',
-          audioDownloadUrl: '',
-          errorMessage,
+          runId: chunkRunId,
           partIndex: chunk.partIndex,
           partCount: chunk.partCount,
-          partGroupId,
+          error: partError,
         });
-        if (partError && typeof partError === 'object') {
-          partError.runAlreadyRecorded = true;
-        }
         throw partError;
       }
     }
 
+    logInfo('scheduleRunner', 'audio.merge.start', {
+      scheduleId: schedule.id,
+      runId,
+      chunkCount: audioChunks.length,
+    });
+    const wavBuffer = mergePcmBase64ToWavBuffer(audioChunks);
+    logInfo('scheduleRunner', 'audio.merge.success', {
+      scheduleId: schedule.id,
+      runId,
+      wavBytes: wavBuffer.length,
+    });
+    const audioInfo = await saveAudio({
+      scheduleId: schedule.id,
+      runId,
+      startedAt,
+      outputPrefix: schedule.outputPrefix,
+      wavBuffer,
+    });
     const finishedAt = new Date().toISOString();
+    const textInfo = await saveTextArtifact({
+      scheduleId: schedule.id,
+      runId,
+      startedAt,
+      outputPrefix: schedule.outputPrefix,
+      payload: {
+        scheduleId: schedule.id,
+        runId,
+        startedAt,
+        finishedAt,
+        resolvedPrompt,
+        generatedText: text,
+        groundingLinks,
+        ttsModel: schedule.ttsModel,
+        toolOptions,
+        chunkCount: ttsChunks.length,
+        audioPath: audioInfo.audioPath,
+      },
+    });
+    const recordedRun = await recordRun({
+      id: runId,
+      scheduleId: schedule.id,
+      startedAt,
+      finishedAt,
+      status: 'success',
+      triggeredBy,
+      resolvedPrompt,
+      generatedText: text,
+      groundingLinks,
+      audioPath: audioInfo.audioPath,
+      textPath: textInfo.textPath,
+      audioDownloadUrl: audioInfo.audioDownloadUrl,
+      errorMessage: '',
+    });
+
     await updateNextRun(
       schedule.id,
       computeNextRunAt({ ...schedule, lastRunAt: finishedAt }, new Date(finishedAt)),
@@ -264,10 +257,10 @@ export async function executeSchedule(schedule, options = {}) {
       scheduleId: schedule.id,
       runId: runId,
       finishedAt,
-      runCount: recordedRuns.length,
+      runCount: 1,
     });
 
-    return recordedRuns[0] || null;
+    return recordedRun;
   } catch (error) {
     const finishedAt = new Date().toISOString();
     const errorMessage = error?.message || 'Schedule execution failed';
@@ -278,23 +271,21 @@ export async function executeSchedule(schedule, options = {}) {
       error,
     });
 
-    if (!error?.runAlreadyRecorded) {
-      await recordRun({
-        id: runId,
-        scheduleId: schedule.id,
-        startedAt,
-        finishedAt,
-        status: 'error',
-        triggeredBy,
-        resolvedPrompt,
-        generatedText: '',
-        groundingLinks: [],
-        audioPath: '',
-        textPath: '',
-        audioDownloadUrl: '',
-        errorMessage,
-      });
-    }
+    await recordRun({
+      id: runId,
+      scheduleId: schedule.id,
+      startedAt,
+      finishedAt,
+      status: 'error',
+      triggeredBy,
+      resolvedPrompt,
+      generatedText: '',
+      groundingLinks: [],
+      audioPath: '',
+      textPath: '',
+      audioDownloadUrl: '',
+      errorMessage,
+    });
 
     await updateNextRun(
       schedule.id,
