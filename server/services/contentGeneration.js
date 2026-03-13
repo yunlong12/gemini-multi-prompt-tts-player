@@ -5,7 +5,7 @@ import { logError, logInfo, logWarn } from '../utils/logger.js';
 
 const TOTAL_ATTEMPTS = 4;
 const BASE_RETRY_DELAY_MS = 1000;
-const DEFAULT_TTS_CHUNK_CONCURRENCY = 3;
+const DEFAULT_TTS_CHUNK_CONCURRENCY = 2;
 const MAX_TTS_CHUNK_CONCURRENCY = 4;
 const DEFAULT_TOOL_OPTIONS = {
   enableGoogleSearch: true,
