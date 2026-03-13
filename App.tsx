@@ -156,7 +156,11 @@ const App: React.FC = () => {
   };
   const itemIdLabel = (id: string) => id.slice(0, 8);
   const logState = (msg: string) => addLog(`[State] ${msg}`);
-  const logPersist = (msg: string) => addLog(`[Persist] ${msg}`);
+  const logPersist = (msg: string) => {
+    if (import.meta.env.DEV) {
+      console.debug(`[Persist] ${msg}`);
+    }
+  };
   const logCache = (msg: string) => addLog(`[Cache] ${msg}`);
   const logSelection = (msg: string) => addLog(`[Selection] ${msg}`);
   const isAdminAuthenticated = Boolean(authSession);

@@ -98,15 +98,24 @@ Use these rules after the inspection pass:
 - Cloud Run service: `gemini-multi-prompt-tts-player`
 - Cloud Scheduler job: `schedule-runner`
 - Cloud Storage bucket: private bucket for WAV and JSON artifacts
-- Current service URL: `https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app`
+- Official user-facing app URL: `https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app`
 - Current runtime service account: `323507996614-compute@developer.gserviceaccount.com`
-- Current alternate Cloud Run URL: `https://gemini-multi-prompt-tts-player-ytzgvkfttq-uc.a.run.app`
+- Service-generated Cloud Run alias: `https://gemini-multi-prompt-tts-player-ytzgvkfttq-uc.a.run.app`
+- Deprecated old-project URL: `https://gemini-multi-prompt-tts-player-7kce3noezq-uc.a.run.app`
+- Deprecated old-project canonical URL: `https://gemini-multi-prompt-tts-player-305416593596.us-central1.run.app`
 - Current health endpoint: `GET /api/health`
 - Current Firestore due-schedule index requirement:
   - `schedules(enabled ASC, nextRunAt ASC)`
 - Current scheduler polling:
   - `*/5 * * * *`
   - timezone `Europe/Paris`
+
+URL usage policy:
+
+- Use only the official user-facing app URL in bookmarks, browser sessions, and docs.
+- Do not use the old-project `7kce3noezq` / `305416593596` URLs. Those point to
+  an older deployment in project `gen-lang-client-0354055629`.
+- Do not treat the service-generated `ytzgvkfttq` alias as the primary app entry.
 
 ========================================================================
 5. Required Secrets
@@ -159,7 +168,7 @@ Recommended values:
 `ALLOWED_ORIGINS` must be a comma-separated allowlist of browser origins that
 are allowed to submit state-changing requests. Example:
 
-`ALLOWED_ORIGINS=https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app,https://gemini-multi-prompt-tts-player-ytzgvkfttq-uc.a.run.app`
+`ALLOWED_ORIGINS=https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app`
 
 ========================================================================
 7. Firestore Notes

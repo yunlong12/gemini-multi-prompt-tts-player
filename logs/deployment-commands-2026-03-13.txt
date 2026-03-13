@@ -56,7 +56,10 @@ Deployment result:
 - Cloud Run service: gemini-multi-prompt-tts-player
 - Revision: gemini-multi-prompt-tts-player-00001-92p
 - Canonical URL: https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app
-- Alternate URL: https://gemini-multi-prompt-tts-player-ytzgvkfttq-uc.a.run.app
+- Service-generated alias: https://gemini-multi-prompt-tts-player-ytzgvkfttq-uc.a.run.app
+- Official user-facing app URL going forward: https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app
+- Deprecated old-project URL: https://gemini-multi-prompt-tts-player-7kce3noezq-uc.a.run.app
+- Deprecated old-project canonical URL: https://gemini-multi-prompt-tts-player-305416593596.us-central1.run.app
 - Scheduler job: schedule-runner
 - Scheduler due-check endpoint verified: `200`
 - Artifact bucket: gs://gemini-tts-daily-briefings-western-creek-489616-m3

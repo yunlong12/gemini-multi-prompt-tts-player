@@ -264,6 +264,19 @@ mandatory and follows a minimal-change policy: reuse existing Cloud Run
 services, service accounts, secrets, buckets, scheduler jobs, and Firestore
 where possible, then create only what is missing.
 
+Official production entry:
+
+- `https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app/`
+
+Deprecated old-project URLs:
+
+- `https://gemini-multi-prompt-tts-player-7kce3noezq-uc.a.run.app/`
+- `https://gemini-multi-prompt-tts-player-305416593596.us-central1.run.app/`
+
+Those deprecated URLs belong to the old project `gen-lang-client-0354055629`
+and can serve an older frontend bundle. Do not use them for production access
+or deployment validation.
+
 Current production architecture:
 
 - Cloud Run for the web app and API
