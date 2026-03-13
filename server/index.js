@@ -22,6 +22,8 @@ import {
 import { deleteArtifact, readArtifact } from './services/resultStore.js';
 import { executeSchedule } from './services/scheduleRunner.js';
 import { getSchedulerConfig, updateSchedulerConfig } from './services/schedulerControl.js';
+import { deleteManualRun, getManualRun, listManualRuns } from './services/manualRunStore.js';
+import { enqueueManualRuns, isManualRunQueued } from './services/manualRunRunner.js';
 import { logError, logInfo, logWarn, requestLogger } from './utils/logger.js';
 
 dotenv.config({ path: '.env.local' });
@@ -203,6 +205,123 @@ app.post('/api/tts', requireAuth, requireTrustedOrigin, ttsRateLimit, async (req
     const message = error?.message || 'Failed to generate speech';
     logError('api.tts', 'generate.error', { requestId: req.requestId, error });
     return res.status(500).json({ message });
+  }
+});
+
+app.post('/api/manual-runs', requireAuth, requireTrustedOrigin, async (req, res) => {
+  try {
+    const prompts = Array.isArray(req.body?.prompts)
+      ? req.body.prompts.map((value) => String(value || '').trim()).filter(Boolean)
+      : [];
+    const ttsModel = String(req.body?.ttsModel || DEFAULT_TTS_MODEL).trim() || DEFAULT_TTS_MODEL;
+    const toolOptions = {
+      enableGoogleSearch: req.body?.enableGoogleSearch ?? true,
+      enableUrlContext: req.body?.enableUrlContext ?? false,
+    };
+
+    if (!prompts.length) {
+      return res.status(400).json({ message: 'prompts are required' });
+    }
+
+    logInfo('api.manualRuns', 'create.start', {
+      requestId: req.requestId,
+      count: prompts.length,
+      ttsModel,
+      ...toolOptions,
+    });
+
+    const runs = await enqueueManualRuns(
+      prompts.map((prompt) => ({
+        prompt,
+        ttsModel,
+        toolOptions,
+      }))
+    );
+
+    logInfo('api.manualRuns', 'create.success', {
+      requestId: req.requestId,
+      count: runs.length,
+      runIds: runs.map((run) => run.id),
+    });
+    return res.status(201).json({ runs });
+  } catch (error) {
+    logError('api.manualRuns', 'create.error', { requestId: req.requestId, error });
+    return res.status(500).json({ message: error?.message || 'Failed to create manual runs' });
+  }
+});
+
+app.get('/api/manual-runs', requireAuth, async (req, res) => {
+  try {
+    const runs = await listManualRuns(req.query.limit);
+    logInfo('api.manualRuns', 'list.success', { requestId: req.requestId, count: runs.length, limit: req.query.limit || 50 });
+    return res.json({ runs });
+  } catch (error) {
+    logError('api.manualRuns', 'list.error', { requestId: req.requestId, error });
+    return res.status(500).json({ message: error?.message || 'Failed to list manual runs' });
+  }
+});
+
+app.get('/api/manual-runs/:id', requireAuth, async (req, res) => {
+  try {
+    const run = await getManualRun(req.params.id);
+    if (!run) {
+      return res.status(404).json({ message: 'Manual run not found' });
+    }
+
+    logInfo('api.manualRuns', 'get.success', {
+      requestId: req.requestId,
+      runId: run.id,
+      status: run.status,
+      queued: await isManualRunQueued(run.id),
+    });
+    return res.json({ run });
+  } catch (error) {
+    logError('api.manualRuns', 'get.error', { requestId: req.requestId, runId: req.params.id, error });
+    return res.status(500).json({ message: error?.message || 'Failed to get manual run' });
+  }
+});
+
+app.delete('/api/manual-runs/:id', requireAuth, requireTrustedOrigin, async (req, res) => {
+  try {
+    const run = await getManualRun(req.params.id);
+    if (!run) {
+      return res.status(404).json({ message: 'Manual run not found' });
+    }
+
+    const artifactErrors = [];
+    for (const artifactPath of [run.audioPath, run.textPath].filter(Boolean)) {
+      try {
+        await deleteArtifact(artifactPath);
+      } catch (error) {
+        artifactErrors.push({
+          artifactPath,
+          message: error?.message || 'Failed to delete artifact',
+        });
+      }
+    }
+
+    const deleted = await deleteManualRun(req.params.id);
+    if (!deleted) {
+      return res.status(404).json({ message: 'Manual run not found' });
+    }
+
+    if (artifactErrors.length > 0) {
+      logWarn('api.manualRuns', 'delete.partial_artifact_failure', {
+        requestId: req.requestId,
+        runId: req.params.id,
+        artifactErrors,
+      });
+    }
+
+    logInfo('api.manualRuns', 'delete.success', {
+      requestId: req.requestId,
+      runId: req.params.id,
+      artifactErrors,
+    });
+    return res.status(204).send();
+  } catch (error) {
+    logError('api.manualRuns', 'delete.error', { requestId: req.requestId, runId: req.params.id, error });
+    return res.status(500).json({ message: error?.message || 'Failed to delete manual run' });
   }
 });
 

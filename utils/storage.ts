@@ -6,6 +6,9 @@ export interface PersistedItem {
   answer: string | null;
   groundingLinks: GroundingUrl[];
   audioBase64?: string;
+  audioPath?: string;
+  audioDownloadUrl?: string;
+  textPath?: string;
   ttsModel?: string;
   enableGoogleSearch?: boolean;
   enableUrlContext?: boolean;

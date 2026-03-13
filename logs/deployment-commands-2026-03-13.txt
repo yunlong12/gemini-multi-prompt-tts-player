@@ -1,0 +1,87 @@
+Gemini Multi-Prompt TTS Player
+Cloud deployment command log
+Date: 2026-03-13
+Workspace: d:\UsefulTemp2\gemini-multi-prompt-tts-player
+Project: western-creek-489616-m3
+Region: us-central1
+
+Notes:
+- This file records the actual deployment-related commands executed in this session.
+- Sensitive values are redacted. Resource names, project IDs, service accounts, URLs, and non-sensitive flags are preserved.
+- This deployment intentionally minimized changes to existing project resources.
+
+1. Confirm active gcloud project
+gcloud config list --format=json
+
+2. Inspect existing project resources before changing anything
+gcloud run services list --platform managed --project western-creek-489616-m3 --format=json
+gcloud scheduler jobs list --location us-central1 --project western-creek-489616-m3 --format=json
+gcloud secrets list --project western-creek-489616-m3 --format=json
+gcloud iam service-accounts list --project western-creek-489616-m3 --format=json
+gcloud storage buckets list --project western-creek-489616-m3 --format=json
+
+3. Inspect existing IAM bindings and Firestore
+gcloud projects get-iam-policy western-creek-489616-m3 --flatten="bindings[].members" --filter="bindings.members:323507996614-compute@developer.gserviceaccount.com" --format=json
+gcloud firestore databases describe --database='(default)' --project western-creek-489616-m3 --format=json
+
+4. Enable missing APIs
+gcloud services enable cloudscheduler.googleapis.com run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com firestore.googleapis.com storage.googleapis.com --project western-creek-489616-m3
+
+5. Create dedicated artifact bucket
+gcloud storage buckets create gs://gemini-tts-daily-briefings-western-creek-489616-m3 --project western-creek-489616-m3 --location us-central1 --uniform-bucket-level-access
+
+6. Prepare temporary Cloud Run env file
+- APP_ADMIN_PASSWORD from repo deployment docs/history
+- ADMIN_SESSION_SECRET generated locally
+- SCHEDULER_SHARED_SECRET generated locally
+- GEMINI_API_KEY reused from existing Secret Manager secret `gemini-key`
+
+7. Deploy Cloud Run service
+gcloud run deploy gemini-multi-prompt-tts-player --source . --project western-creek-489616-m3 --region us-central1 --allow-unauthenticated --service-account 323507996614-compute@developer.gserviceaccount.com --set-secrets GEMINI_API_KEY=gemini-key:latest --env-vars-file C:\Users\45609\AppData\Local\Temp\gemini-multi-prompt-tts-player-deploy\cloudrun-env.yaml --min-instances 1 --max-instances 10 --concurrency 80 --timeout 300 --port 8080 --quiet
+
+8. Create or update Cloud Scheduler job
+gcloud scheduler jobs create http schedule-runner --location us-central1 --project western-creek-489616-m3 --schedule "*/5 * * * *" --time-zone "Europe/Paris" --uri "https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app/api/internal/run-due-schedules" --http-method POST --headers "X-Internal-Key=[REDACTED_SECRET],Content-Type=application/json" --message-body "{}"
+
+9. Create required Firestore composite index for scheduler due-query
+gcloud firestore indexes composite create --project western-creek-489616-m3 --collection-group=schedules --field-config="field-path=enabled,order=ascending" --field-config="field-path=nextRunAt,order=ascending"
+
+10. Verify deployed service
+Invoke-WebRequest -UseBasicParsing https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app/api/health
+gcloud run services describe gemini-multi-prompt-tts-player --region us-central1 --project western-creek-489616-m3 --format=json
+gcloud scheduler jobs describe schedule-runner --location us-central1 --project western-creek-489616-m3 --format=json
+Invoke-RestMethod -Method Post https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app/api/internal/run-due-schedules -Headers @{ 'X-Internal-Key'='[REDACTED_SECRET]'; 'Content-Type'='application/json' } -Body '{}'
+gcloud scheduler jobs run schedule-runner --location us-central1 --project western-creek-489616-m3
+
+Deployment result:
+- Cloud Run service: gemini-multi-prompt-tts-player
+- Revision: gemini-multi-prompt-tts-player-00001-92p
+- Canonical URL: https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app
+- Alternate URL: https://gemini-multi-prompt-tts-player-ytzgvkfttq-uc.a.run.app
+- Scheduler job: schedule-runner
+- Scheduler due-check endpoint verified: `200`
+- Artifact bucket: gs://gemini-tts-daily-briefings-western-creek-489616-m3
+- Runtime service account: 323507996614-compute@developer.gserviceaccount.com
+
+Standard pre-deploy inspection template:
+1. Confirm active account and target project.
+   - `gcloud config list --format=json`
+   - `gcloud auth list --format=json`
+2. Inspect existing Cloud Run services.
+   - `gcloud run services list --project western-creek-489616-m3 --format=json`
+3. Inspect existing Cloud Scheduler jobs.
+   - `gcloud scheduler jobs list --location us-central1 --project western-creek-489616-m3 --format=json`
+4. Inspect existing secrets.
+   - `gcloud secrets list --project western-creek-489616-m3 --format=json`
+5. Inspect existing service accounts.
+   - `gcloud iam service-accounts list --project western-creek-489616-m3 --format=json`
+6. Inspect existing buckets.
+   - `gcloud storage buckets list --project western-creek-489616-m3 --format=json`
+7. Inspect Firestore database and indexes.
+   - `gcloud firestore databases describe --database='(default)' --project western-creek-489616-m3 --format=json`
+   - `gcloud firestore indexes composite list --project western-creek-489616-m3 --format=json`
+8. Decide on reuse before create/update.
+   - Existing service -> update it
+   - Existing scheduler job -> update it
+   - Existing secret -> reuse it
+   - Existing bucket -> reuse it
+   - Missing Firestore index -> create only the index

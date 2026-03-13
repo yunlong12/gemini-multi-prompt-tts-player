@@ -8,6 +8,8 @@ export interface GeminiToolOptions {
   enableUrlContext?: boolean;
 }
 
+export type ManualRunStatus = 'queued' | 'generating_text' | 'generating_audio' | 'success' | 'error';
+
 export enum ItemStatus {
   QUEUED = 'QUEUED',
   IDLE = 'IDLE',
@@ -24,6 +26,9 @@ export interface ProcessItem {
   answer: string | null;
   audioBuffer: AudioBuffer | null;
   audioBase64?: string;
+  audioPath?: string;
+  audioDownloadUrl?: string;
+  textPath?: string;
   ttsModel?: string;
   enableGoogleSearch?: boolean;
   enableUrlContext?: boolean;
@@ -111,6 +116,23 @@ export interface ScheduleRun {
 
 export interface AuthSession {
   expiresAt: string;
+}
+
+export interface ManualRun {
+  id: string;
+  prompt: string;
+  status: ManualRunStatus;
+  generatedText?: string;
+  groundingLinks: GroundingUrl[];
+  ttsModel: string;
+  toolOptions?: GeminiToolOptions;
+  audioPath?: string;
+  audioDownloadUrl?: string;
+  textPath?: string;
+  errorMessage?: string;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt?: string;
 }
 
 export interface SchedulerConfig {

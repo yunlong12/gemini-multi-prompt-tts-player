@@ -1,5 +1,4 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { v4 as uuidv4 } from 'uuid';
 import { AlertTriangle, CalendarClock, CheckSquare, ListMusic, PlayCircle, Square, Terminal, Trash2 } from 'lucide-react';
 import { InputSection } from './components/InputSection';
 import { LoginForm } from './components/LoginForm';
@@ -22,11 +21,11 @@ import {
   updateSchedule as updateScheduleApi,
   updateSchedulerConfig as updateSchedulerConfigApi,
 } from './services/adminApi';
-import { generateSpeech, generateTextAnswer } from './services/geminiService';
-import { AuthSession, GeminiToolOptions, ItemStatus, ProcessItem, Schedule, SchedulerConfig, ScheduleRun } from './types';
-import { arrayBufferToBase64, audioBufferToPcmBase64, base64ToUint8Array, decodeAudioData, mergeAudioBuffers } from './utils/audioUtils';
+import { createManualRuns as createManualRunsApi, deleteManualRun as deleteManualRunApi, fetchManualRuns } from './services/manualRunApi';
+import { AuthSession, GeminiToolOptions, ItemStatus, ManualRun, ProcessItem, Schedule, SchedulerConfig, ScheduleRun } from './types';
+import { arrayBufferToBase64, base64ToUint8Array, decodeAudioData } from './utils/audioUtils';
 import { clearPersistedState, loadPersistedState, PersistedScheduledRun, PersistedState, savePersistedState } from './utils/storage';
-import { formatPartLabel, splitTextForTTS } from './utils/ttsChunks';
+import { formatPartLabel } from './utils/ttsChunks';
 
 const ONE_HOUR_MS = 3600000;
 const DEFAULT_TTS_MODEL = 'gemini-2.5-pro-preview-tts';
@@ -34,10 +33,10 @@ const DEFAULT_TOOL_OPTIONS: Required<GeminiToolOptions> = {
   enableGoogleSearch: true,
   enableUrlContext: false,
 };
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const POLLING_PRESETS = [1, 5, 10, 15, 30, 60];
 type RateLimitScope = 'login' | 'text' | 'tts';
 type ScheduledAudioLoadState = 'idle' | 'queued' | 'downloading' | 'decoding' | 'cached' | 'error';
+const MANUAL_RUN_POLL_INTERVAL_MS = 5000;
 
 const cronToMinutes = (cron: string): number | null => {
   const normalized = String(cron || '').trim();
@@ -72,6 +71,44 @@ const formatHistoryDateLabel = (timestamp: number) =>
     day: 'numeric',
   });
 
+const manualRunStatusToItemStatus = (status: ManualRun['status']): ItemStatus => {
+  switch (status) {
+    case 'queued':
+      return ItemStatus.QUEUED;
+    case 'generating_text':
+      return ItemStatus.GENERATING_TEXT;
+    case 'generating_audio':
+      return ItemStatus.GENERATING_AUDIO;
+    case 'success':
+      return ItemStatus.READY;
+    case 'error':
+      return ItemStatus.ERROR;
+    default:
+      return ItemStatus.IDLE;
+  }
+};
+
+const manualRunToProcessItem = (run: ManualRun, existing?: ProcessItem): ProcessItem => ({
+  id: run.id,
+  prompt: run.prompt,
+  answer: run.generatedText || null,
+  audioBuffer: existing?.audioBuffer || null,
+  audioBase64: existing?.audioBase64,
+  audioPath: run.audioPath || existing?.audioPath,
+  audioDownloadUrl: run.audioDownloadUrl || existing?.audioDownloadUrl,
+  textPath: run.textPath || existing?.textPath,
+  ttsModel: run.ttsModel,
+  enableGoogleSearch: run.toolOptions?.enableGoogleSearch ?? existing?.enableGoogleSearch ?? DEFAULT_TOOL_OPTIONS.enableGoogleSearch,
+  enableUrlContext: run.toolOptions?.enableUrlContext ?? existing?.enableUrlContext ?? DEFAULT_TOOL_OPTIONS.enableUrlContext,
+  partIndex: undefined,
+  partCount: undefined,
+  partGroupId: undefined,
+  status: existing?.status === ItemStatus.PLAYING && run.status === 'success' ? ItemStatus.PLAYING : manualRunStatusToItemStatus(run.status),
+  groundingLinks: run.groundingLinks || [],
+  error: run.errorMessage || undefined,
+  timestamp: new Date(run.createdAt).getTime(),
+});
+
 const App: React.FC = () => {
   const [items, setItems] = useState<ProcessItem[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
@@ -103,9 +140,6 @@ const App: React.FC = () => {
     text: '',
     tts: '',
   });
-  const stopProcessingRef = useRef(false);
-  const processingQueueRef = useRef<string[]>([]);
-  const isWorkerRunningRef = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
   const itemsRef = useRef<ProcessItem[]>([]);
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -113,6 +147,7 @@ const App: React.FC = () => {
   const scheduledPrefetchedIdsRef = useRef<Record<string, boolean>>({});
   const scheduledPrefetchRunningRef = useRef(false);
   const scheduledPrefetchCycleRef = useRef(0);
+  const manualAudioLoadPromisesRef = useRef<Record<string, Promise<AudioBuffer | null>>>({});
 
   const addLog = (msg: string) => setLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
   const promptSnippet = (value: string, max = 72) => {
@@ -120,7 +155,6 @@ const App: React.FC = () => {
     return text.length <= max ? text : `${text.slice(0, max - 3)}...`;
   };
   const itemIdLabel = (id: string) => id.slice(0, 8);
-  const logQueue = (msg: string) => addLog(`[Queue] ${msg}`);
   const logState = (msg: string) => addLog(`[State] ${msg}`);
   const logPersist = (msg: string) => addLog(`[Persist] ${msg}`);
   const logCache = (msg: string) => addLog(`[Cache] ${msg}`);
@@ -250,13 +284,27 @@ const App: React.FC = () => {
   }, []);
   useEffect(() => { if (isAdminAuthenticated) void refreshAdminData(); }, [isAdminAuthenticated]);
   useEffect(() => {
+    if (!isAdminAuthenticated) {
+      setItems([]);
+      itemsRef.current = [];
+      return;
+    }
+
+    void refreshManualRuns(true);
+    const intervalId = window.setInterval(() => {
+      void refreshManualRuns();
+    }, MANUAL_RUN_POLL_INTERVAL_MS);
+
+    return () => window.clearInterval(intervalId);
+  }, [isAdminAuthenticated]);
+  useEffect(() => {
     const loadState = async () => {
       try {
-          const persisted = await loadPersistedState();
-          if (persisted) {
-            addLog(`[Storage] Found persisted state with ${persisted.items?.length || 0} item(s).`);
-            logPersist(`[Hydrate] Starting restore for ${persisted.items?.length || 0} manual item(s) and ${persisted.scheduledRuns?.length || 0} scheduled run cache record(s).`);
-            const ctx = getAudioContext();
+        const persisted = await loadPersistedState();
+        if (persisted) {
+          addLog(`[Storage] Found persisted state with ${persisted.items?.length || 0} item(s).`);
+          logPersist(`[Hydrate] Starting restore for ${persisted.items?.length || 0} manual item(s) and ${persisted.scheduledRuns?.length || 0} scheduled run cache record(s).`);
+          const ctx = getAudioContext();
           const hydratedItems: ProcessItem[] = await Promise.all((persisted.items || []).map(async (item) => {
             let audioBuffer: AudioBuffer | null = null;
             if (item.audioBase64) {
@@ -267,11 +315,28 @@ const App: React.FC = () => {
               }
             }
             let status = item.status as ItemStatus;
-            let error = item.error;
-            if (status === ItemStatus.GENERATING_TEXT || status === ItemStatus.GENERATING_AUDIO) { status = ItemStatus.ERROR; error = error || 'Process interrupted (page refresh or crash)'; }
-            else if (status === ItemStatus.PLAYING) status = ItemStatus.READY;
+            if (status === ItemStatus.PLAYING) status = ItemStatus.READY;
             if (audioBuffer && status !== ItemStatus.ERROR) status = ItemStatus.READY;
-            return { id: item.id, prompt: item.prompt, answer: item.answer, groundingLinks: item.groundingLinks || [], audioBuffer, audioBase64: item.audioBase64, ttsModel: item.ttsModel, enableGoogleSearch: item.enableGoogleSearch ?? DEFAULT_TOOL_OPTIONS.enableGoogleSearch, enableUrlContext: item.enableUrlContext ?? DEFAULT_TOOL_OPTIONS.enableUrlContext, partIndex: item.partIndex, partCount: item.partCount, partGroupId: item.partGroupId, error, status, timestamp: item.timestamp || persisted.updatedAt };
+            return {
+              id: item.id,
+              prompt: item.prompt,
+              answer: item.answer,
+              groundingLinks: item.groundingLinks || [],
+              audioBuffer,
+              audioBase64: item.audioBase64,
+              audioPath: item.audioPath,
+              audioDownloadUrl: item.audioDownloadUrl,
+              textPath: item.textPath,
+              ttsModel: item.ttsModel,
+              enableGoogleSearch: item.enableGoogleSearch ?? DEFAULT_TOOL_OPTIONS.enableGoogleSearch,
+              enableUrlContext: item.enableUrlContext ?? DEFAULT_TOOL_OPTIONS.enableUrlContext,
+              partIndex: item.partIndex,
+              partCount: item.partCount,
+              partGroupId: item.partGroupId,
+              error: item.error,
+              status,
+              timestamp: item.timestamp || persisted.updatedAt,
+            };
           }));
           setItems((prev) => {
             const unique = new Map<string, ProcessItem>();
@@ -297,7 +362,25 @@ const App: React.FC = () => {
     if (isHydrating) return;
     const timeout = setTimeout(async () => {
       const state: PersistedState = {
-        items: items.map((item) => ({ id: item.id, prompt: item.prompt, answer: item.answer, groundingLinks: item.groundingLinks, audioBase64: item.audioBase64, ttsModel: item.ttsModel, enableGoogleSearch: item.enableGoogleSearch, enableUrlContext: item.enableUrlContext, partIndex: item.partIndex, partCount: item.partCount, partGroupId: item.partGroupId, error: item.error, status: item.status, timestamp: item.timestamp })),
+        items: items.map((item) => ({
+          id: item.id,
+          prompt: item.prompt,
+          answer: item.answer,
+          groundingLinks: item.groundingLinks,
+          audioBase64: item.audioBase64,
+          audioPath: item.audioPath,
+          audioDownloadUrl: item.audioDownloadUrl,
+          textPath: item.textPath,
+          ttsModel: item.ttsModel,
+          enableGoogleSearch: item.enableGoogleSearch,
+          enableUrlContext: item.enableUrlContext,
+          partIndex: item.partIndex,
+          partCount: item.partCount,
+          partGroupId: item.partGroupId,
+          error: item.error,
+          status: item.status,
+          timestamp: item.timestamp,
+        })),
         scheduledRuns: Object.values(persistedScheduledRuns),
         recentPrompts: [],
         updatedAt: Date.now(),
@@ -323,6 +406,95 @@ const App: React.FC = () => {
       void audioContextRef.current.resume();
     }
     return audioContextRef.current;
+  };
+  const syncManualRuns = (manualRuns: ManualRun[]) => {
+    setItems((prev) => {
+      const previousById = new Map(prev.map((item) => [item.id, item]));
+      const nextItems = manualRuns.map((run) => manualRunToProcessItem(run, previousById.get(run.id)));
+      itemsRef.current = nextItems;
+      return nextItems.sort((a, b) => b.timestamp - a.timestamp || (a.partIndex || 1) - (b.partIndex || 1));
+    });
+  };
+  const refreshManualRuns = async (logLabel = false) => {
+    if (!isAdminAuthenticated) {
+      return;
+    }
+    try {
+      const manualRuns = await fetchManualRuns(100);
+      syncManualRuns(manualRuns);
+      if (logLabel) {
+        addLog(`[Manual] Refreshed ${manualRuns.length} manual run(s).`);
+      }
+    } catch (error: any) {
+      if (isUnauthorizedError(error)) {
+        clearAdminSession();
+        return;
+      }
+      addLog(`[Manual] Refresh failed: ${error?.message || error}`);
+    }
+  };
+  const loadManualRunAudio = async (itemId: string): Promise<AudioBuffer | null> => {
+    const item = itemsRef.current.find((entry) => entry.id === itemId);
+    if (!item?.audioPath) {
+      return null;
+    }
+    if (item.audioBuffer) {
+      return item.audioBuffer;
+    }
+    if (manualAudioLoadPromisesRef.current[itemId]) {
+      return manualAudioLoadPromisesRef.current[itemId];
+    }
+
+    const promise = (async () => {
+      try {
+        addLog(`[Player] Loading manual audio for ${itemIdLabel(itemId)}.`);
+        const response = await fetch(`/api/artifacts/${encodeURIComponent(item.audioPath || '')}`);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const arrayBuffer = await response.arrayBuffer();
+        const audioBase64 = arrayBufferToBase64(arrayBuffer);
+        const decoded = await getAudioContext().decodeAudioData(arrayBuffer.slice(0));
+        setItems((prev) => {
+          const next = prev.map((entry) =>
+            entry.id === itemId
+              ? {
+                  ...entry,
+                  audioBuffer: decoded,
+                  audioBase64,
+                  status: entry.status === ItemStatus.ERROR ? ItemStatus.ERROR : ItemStatus.READY,
+                }
+              : entry
+          );
+          itemsRef.current = next;
+          return next;
+        });
+        addLog(`[Player] Manual audio ready for ${itemIdLabel(itemId)} (${decoded.duration.toFixed(2)}s).`);
+        return decoded;
+      } catch (error: any) {
+        const message = error?.message || 'Failed to load manual audio';
+        setItems((prev) => {
+          const next = prev.map((entry) =>
+            entry.id === itemId
+              ? {
+                  ...entry,
+                  error: message,
+                  status: entry.status === ItemStatus.PLAYING ? ItemStatus.ERROR : entry.status,
+                }
+              : entry
+          );
+          itemsRef.current = next;
+          return next;
+        });
+        addLog(`[Player] Manual audio load failed for ${itemIdLabel(itemId)}: ${message}`);
+        return null;
+      } finally {
+        delete manualAudioLoadPromisesRef.current[itemId];
+      }
+    })();
+
+    manualAudioLoadPromisesRef.current[itemId] = promise;
+    return promise;
   };
   const loadScheduledRunAudio = async (runId: string): Promise<AudioBuffer | null> => {
     const playerItemId = `scheduled:${runId}`;
@@ -511,190 +683,67 @@ const App: React.FC = () => {
       scheduledPrefetchRunningRef.current = false;
     })();
   }, [runs, persistedScheduledRuns, scheduledAudioBuffersById]);
-  const runQueueWorker = async () => {
-    if (isWorkerRunningRef.current) return;
-    isWorkerRunningRef.current = true;
-    setIsProcessingActive(true);
-    logQueue(`Worker started with ${processingQueueRef.current.length} queued item(s).`);
-    try {
-      while (processingQueueRef.current.length > 0) {
-        if (stopProcessingRef.current) { addLog(`Worker halted. ${processingQueueRef.current.length} queued item(s) remain.`); break; }
-        const currentId = processingQueueRef.current.shift();
-        if (!currentId) continue;
-        logQueue(`Dequeued item ${itemIdLabel(currentId)}. Remaining queue length: ${processingQueueRef.current.length}.`);
-        let currentItem = itemsRef.current.find((item) => item.id === currentId);
-        if (!currentItem) {
-          logQueue(`Item ${itemIdLabel(currentId)} missing on first lookup, retrying after micro-wait.`);
-          await wait(0);
-          currentItem = itemsRef.current.find((item) => item.id === currentId);
-        }
-        if (!currentItem) { addLog(`Skipping removed item ${currentId.slice(0, 8)}.`); continue; }
-        const currentPrompt = currentItem.prompt;
-        const modelForItem = currentItem.ttsModel || DEFAULT_TTS_MODEL;
-        let currentStage: RateLimitScope = 'text';
-        addLog(`Processing "${currentPrompt}" (${processingQueueRef.current.length} queued after this).`);
-        logQueue(`Processing item ${itemIdLabel(currentId)} prompt="${promptSnippet(currentPrompt)}".`);
-        setItems((prev) => prev.map((item) => item.id === currentId ? { ...item, status: ItemStatus.GENERATING_TEXT, error: undefined } : item));
-        logState(`Item ${itemIdLabel(currentId)} status -> ${ItemStatus.GENERATING_TEXT}.`);
-        try {
-          const { text, groundingLinks } = await generateTextAnswer(
-            currentPrompt,
-            {
-              enableGoogleSearch: currentItem.enableGoogleSearch ?? DEFAULT_TOOL_OPTIONS.enableGoogleSearch,
-              enableUrlContext: currentItem.enableUrlContext ?? DEFAULT_TOOL_OPTIONS.enableUrlContext,
-            },
-            addLog
-          );
-          clearRateLimitWarning('text');
-          logState(`Text ready for ${itemIdLabel(currentId)}. Length=${text.length}, sources=${groundingLinks.length}.`);
-          if (stopProcessingRef.current) {
-            setItems((prev) => {
-              const next = prev.map((item) => item.id === currentId ? { ...item, status: ItemStatus.ERROR, error: 'Stopped by user.' } : item);
-              itemsRef.current = next;
-              return next;
-            });
-            logState(`Item ${itemIdLabel(currentId)} stopped by user during text stage.`);
-            break;
-          }
-          if (!itemsRef.current.some((item) => item.id === currentId)) { addLog(`Item deleted during processing, skipping "${currentPrompt}".`); continue; }
-          currentStage = 'tts';
-          const ttsChunks = splitTextForTTS(text);
-          setItems((prev) => {
-            const next = prev.map((item) => item.id === currentId ? {
-              ...item,
-              answer: text,
-              groundingLinks,
-              status: ItemStatus.GENERATING_AUDIO,
-              error: undefined,
-              partIndex: undefined,
-              partCount: undefined,
-              partGroupId: undefined,
-            } : item);
-            itemsRef.current = next;
-            return next;
-          });
-          logState(`Item ${itemIdLabel(currentId)} status -> ${ItemStatus.GENERATING_AUDIO}. Chunk count=${ttsChunks.length}.`);
-          if (ttsChunks.length > 1) {
-            addLog(`[TTS] Split long text into ${ttsChunks.length} part(s) for "${currentPrompt}".`);
-          }
-          logQueue(`Item ${itemIdLabel(currentId)} registered ${ttsChunks.length} internal chunk(s).`);
-
-          const decodedChunks: AudioBuffer[] = [];
-          for (const chunk of ttsChunks) {
-            const partLabel = formatPartLabel(chunk.partIndex, chunk.partCount) || 'single part';
-            try {
-              addLog(`[TTS] Starting ${partLabel} for "${currentPrompt}".`);
-              logState(`Chunk ${partLabel} started for item ${itemIdLabel(currentId)}. Text length=${chunk.text.length}.`);
-              const base64Audio = await generateSpeech(chunk.text, modelForItem, addLog, { contextLabel: partLabel });
-              clearRateLimitWarning('tts');
-              if (stopProcessingRef.current) {
-                setItems((prev) => {
-                  const next = prev.map((item) => item.id === currentId ? { ...item, status: ItemStatus.ERROR, error: 'Stopped by user.' } : item);
-                  itemsRef.current = next;
-                  return next;
-                });
-                logState(`Item ${itemIdLabel(currentId)} stopped by user during ${partLabel}.`);
-                throw Object.assign(new Error('Stopped by user.'), { alreadyLogged: true });
-              }
-              if (!itemsRef.current.some((item) => item.id === currentId)) {
-                addLog(`Item deleted before audio decode, skipping "${currentPrompt}" ${partLabel}.`);
-                throw Object.assign(new Error(`Item ${itemIdLabel(currentId)} deleted during ${partLabel}.`), { alreadyLogged: true });
-              }
-              addLog(`[TTS] ${partLabel} audio received. Decoding...`);
-              logState(`Chunk ${partLabel} received ${base64Audio.length} base64 chars. Starting decode.`);
-              const audioBuffer = await decodeAudioData(base64Audio, getAudioContext(), addLog);
-              addLog(`[TTS] ${partLabel} ready.`);
-              logState(`Chunk ${partLabel} decoded. Duration=${audioBuffer.duration.toFixed(2)}s.`);
-              decodedChunks.push(audioBuffer);
-            } catch (partError: any) {
-              const failureMessage = partError?.message || `${partLabel} failed.`;
-              addLog(`[TTS] ${failureMessage}`);
-              if (isRateLimitError(partError)) {
-                setRateLimitWarning('tts', 'Daily TTS limit reached: 200 requests per day.');
-              }
-              setItems((prev) => {
-                const next = prev.map((item) => item.id === currentId ? { ...item, status: ItemStatus.ERROR, error: failureMessage } : item);
-                itemsRef.current = next;
-                return next;
-              });
-              logState(`Item ${itemIdLabel(currentId)} status -> ${ItemStatus.ERROR}. Failed during ${partLabel}.`);
-              throw Object.assign(partError instanceof Error ? partError : new Error(failureMessage), { alreadyLogged: true });
-            }
-          }
-          addLog(`[Merge] Starting merge for ${decodedChunks.length} chunk(s) for "${currentPrompt}".`);
-          const mergedAudioBuffer = mergeAudioBuffers(getAudioContext(), decodedChunks, addLog);
-          const mergedAudioBase64 = audioBufferToPcmBase64(mergedAudioBuffer);
-          logState(`Merge complete for item ${itemIdLabel(currentId)}. Duration=${mergedAudioBuffer.duration.toFixed(2)}s, PCM base64 length=${mergedAudioBase64.length}.`);
-          setItems((prev) => {
-            const next = prev.map((item) => item.id === currentId ? {
-              ...item,
-              answer: text,
-              groundingLinks,
-              audioBuffer: mergedAudioBuffer,
-              audioBase64: mergedAudioBase64,
-              status: ItemStatus.READY,
-              error: undefined,
-              partIndex: undefined,
-              partCount: undefined,
-              partGroupId: undefined,
-            } : item);
-            itemsRef.current = next;
-            return next;
-          });
-          logState(`Item ${itemIdLabel(currentId)} status -> ${ItemStatus.READY}.`);
-          logSelection(`Selecting merged manual item ${itemIdLabel(currentId)} for autoplay.`);
-          setSelectedItemId((prev) => prev || currentId);
-          setPlayerAutoplayRequestId((prev) => prev || `manual:${currentId}`);
-          addLog(`Completed "${currentPrompt}".`);
-        } catch (error: any) {
-          if (!error?.alreadyLogged) {
-            addLog(`Error: ${error.message}`);
-          }
-          if (isRateLimitError(error)) {
-            const warningMessage =
-              currentStage === 'text'
-                ? 'Daily text generation limit reached: 200 requests per day.'
-                : 'Daily TTS limit reached: 200 requests per day.';
-            setRateLimitWarning(currentStage, warningMessage);
-          }
-          setItems((prev) => {
-            if (currentStage === 'tts') {
-              return prev;
-            }
-            const next = prev.map((item) => item.id === currentId ? { ...item, status: ItemStatus.ERROR, error: error.message } : item);
-            itemsRef.current = next;
-            return next;
-          });
-          logState(`Item ${itemIdLabel(currentId)} failed in stage ${currentStage}: ${error.message}`);
-        }
-      }
-    } finally {
-      isWorkerRunningRef.current = false;
-      setIsProcessingActive(false);
-      stopProcessingRef.current = false;
-      logQueue('Worker stopped.');
+  useEffect(() => {
+    const pending = items.some((item) =>
+      item.status === ItemStatus.QUEUED || item.status === ItemStatus.GENERATING_TEXT || item.status === ItemStatus.GENERATING_AUDIO
+    );
+    setIsProcessingActive(pending);
+  }, [items]);
+  useEffect(() => {
+    const pendingManualAudio = items.filter((item) => item.status === ItemStatus.READY && item.audioPath && !item.audioBuffer);
+    if (!pendingManualAudio.length) {
+      return;
     }
-  };
 
+    void (async () => {
+      for (const item of pendingManualAudio) {
+        await loadManualRunAudio(item.id);
+      }
+    })();
+  }, [items]);
   const processPrompts = async (prompts: string[], ttsModel: string, toolOptions: GeminiToolOptions) => {
     const cleanPrompts = prompts.map((p) => p.trim()).filter(Boolean);
     if (!cleanPrompts.length) return;
-    stopProcessingRef.current = false;
-    const timestamp = Date.now();
     const normalizedToolOptions = {
       enableGoogleSearch: toolOptions.enableGoogleSearch ?? DEFAULT_TOOL_OPTIONS.enableGoogleSearch,
       enableUrlContext: toolOptions.enableUrlContext ?? DEFAULT_TOOL_OPTIONS.enableUrlContext,
     };
-    const newItems = cleanPrompts.map((prompt) => ({ id: uuidv4(), prompt, answer: null, audioBuffer: null, audioBase64: undefined, ttsModel, enableGoogleSearch: normalizedToolOptions.enableGoogleSearch, enableUrlContext: normalizedToolOptions.enableUrlContext, partIndex: undefined, partCount: undefined, partGroupId: undefined, status: ItemStatus.QUEUED, groundingLinks: [], timestamp }));
-    processingQueueRef.current.push(...newItems.map((item) => item.id));
-    itemsRef.current = [...newItems, ...itemsRef.current];
-    setItems((prev) => [...newItems, ...prev]);
-    addLog(`Enqueued ${newItems.length} prompt(s) with ${ttsModel}. Tools: googleSearch=${normalizedToolOptions.enableGoogleSearch}, urlContext=${normalizedToolOptions.enableUrlContext}. Queue length: ${processingQueueRef.current.length}.`);
-    newItems.forEach((item, index) => {
-      logQueue(`Enqueued item ${itemIdLabel(item.id)} at queue position ${processingQueueRef.current.length - newItems.length + index + 1}. Prompt="${promptSnippet(item.prompt)}".`);
-      logState(`Item ${itemIdLabel(item.id)} status -> ${ItemStatus.QUEUED}.`);
-    });
-    if (!isWorkerRunningRef.current) void runQueueWorker();
+    addLog(`Submitting ${cleanPrompts.length} prompt(s) to server queue with ${ttsModel}.`);
+    try {
+      const createdRuns = await createManualRunsApi(cleanPrompts, ttsModel, normalizedToolOptions);
+      syncManualRuns([
+        ...createdRuns,
+        ...itemsRef.current
+          .filter((item) => !createdRuns.some((run) => run.id === item.id))
+          .map((item) => ({
+            id: item.id,
+            prompt: item.prompt,
+            status: item.status === ItemStatus.ERROR ? 'error' : item.status === ItemStatus.READY || item.status === ItemStatus.PLAYING ? 'success' : 'queued',
+            generatedText: item.answer || '',
+            groundingLinks: item.groundingLinks,
+            ttsModel: item.ttsModel || DEFAULT_TTS_MODEL,
+            toolOptions: {
+              enableGoogleSearch: item.enableGoogleSearch,
+              enableUrlContext: item.enableUrlContext,
+            },
+            audioPath: item.audioPath,
+            audioDownloadUrl: item.audioDownloadUrl,
+            textPath: item.textPath,
+            errorMessage: item.error,
+            createdAt: new Date(item.timestamp).toISOString(),
+            updatedAt: new Date(item.timestamp).toISOString(),
+            finishedAt: item.status === ItemStatus.READY || item.status === ItemStatus.ERROR || item.status === ItemStatus.PLAYING ? new Date(item.timestamp).toISOString() : undefined,
+          } as ManualRun)),
+      ]);
+      setSelectedItemId((prev) => prev || createdRuns[0]?.id || null);
+      createdRuns.forEach((run) => logState(`Manual run ${itemIdLabel(run.id)} queued. Prompt="${promptSnippet(run.prompt)}".`));
+      await refreshManualRuns(true);
+    } catch (error: any) {
+      addLog(`[Manual] Failed to submit prompts: ${error?.message || error}`);
+      if (isRateLimitError(error)) {
+        setRateLimitWarning('text', 'Daily text generation limit reached: 200 requests per day.');
+      }
+    }
   };
 
   const handleAdminLogin = async (password: string) => {
@@ -868,13 +917,19 @@ const App: React.FC = () => {
       return false;
     }
 
-    processingQueueRef.current = processingQueueRef.current.filter((queueId) => queueId !== itemId);
-    if (selectedItemId === itemId) {
-      setSelectedItemId(null);
+    try {
+      await deleteManualRunApi(itemId);
+    } catch (error: any) {
+      addLog(`[History] Failed to delete manual item "${target.prompt}": ${error?.message || error}`);
+      if (isUnauthorizedError(error)) {
+        clearAdminSession();
+      }
+      return false;
     }
-    if (playerAutoplayRequestId === `manual:${itemId}`) {
-      setPlayerAutoplayRequestId(null);
-    }
+
+    delete manualAudioLoadPromisesRef.current[itemId];
+    if (selectedItemId === itemId) setSelectedItemId(null);
+    if (playerAutoplayRequestId === `manual:${itemId}`) setPlayerAutoplayRequestId(null);
     setItems((prev) => prev.filter((entry) => entry.id !== itemId));
     addLog(`[History] Deleted manual item "${target.prompt}".`);
     return true;
@@ -890,11 +945,7 @@ const App: React.FC = () => {
 
   const resetAll = () => {
     addLog('[UI] Clearing full session state (results/logs/player queue).');
-    logState(`Reset requested. items=${itemsRef.current.length}, queued=${processingQueueRef.current.length}, persistedRuns=${Object.keys(persistedScheduledRuns).length}.`);
-    stopProcessingRef.current = true;
-    processingQueueRef.current = [];
-    isWorkerRunningRef.current = false;
-    setIsProcessingActive(false);
+    logState(`Reset requested. items=${itemsRef.current.length}, persistedRuns=${Object.keys(persistedScheduledRuns).length}.`);
     setItems([]);
     setLogs([]);
     setSelectedItemId(null);
@@ -1245,7 +1296,7 @@ const App: React.FC = () => {
       )}
 
       {activeTab === 'history' && <div className="bg-slate-900 rounded-lg border border-slate-800 p-4 mb-10 space-y-4">
-        <div className="flex flex-wrap items-center gap-3 justify-between border-b border-slate-800 pb-4"><div className="flex items-center gap-2 text-slate-200 font-semibold"><ListMusic size={18} /> History (Stored in IndexedDB)</div><div className="text-xs text-slate-500 italic">Manual items and locally cached scheduled runs are stored here.</div></div>
+        <div className="flex flex-wrap items-center gap-3 justify-between border-b border-slate-800 pb-4"><div className="flex items-center gap-2 text-slate-200 font-semibold"><ListMusic size={18} /> History</div><div className="text-xs text-slate-500 italic">Manual runs come from the server. Scheduled runs may also use local audio cache.</div></div>
         {historyEntries.length > 0 && (
           <div className="flex flex-col gap-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3 md:flex-row md:items-center md:justify-between">
             <div className="text-sm text-slate-300">

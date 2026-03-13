@@ -3,24 +3,116 @@ Gemini Multi-Prompt TTS Player Deployment Guide
 This document matches the current production architecture:
 - Frontend and backend run in one Cloud Run service
 - Firestore stores schedules, runs, and global rate-limit counters
+- Firestore also stores manual async runs for refresh-safe manual generation
 - Cloud Storage stores scheduled WAV and JSON artifacts
 - Cloud Scheduler triggers due-schedule polling
 
 ========================================================================
-1. Required GCP Resources
+1. Pre-Deploy Inspection
 ========================================================================
 
-- Project ID: your real GCP project ID
+Every production deploy must start with a read-only inspection pass.
+Do not deploy first and inspect later.
+
+Required inspection commands, in this exact order:
+
+1. Confirm active project and account
+   - `gcloud config list --format=json`
+   - `gcloud auth list --format=json`
+2. Inspect existing Cloud Run services
+   - `gcloud run services list --project western-creek-489616-m3 --format=json`
+3. Inspect existing Cloud Scheduler jobs
+   - `gcloud scheduler jobs list --location us-central1 --project western-creek-489616-m3 --format=json`
+4. Inspect existing secrets
+   - `gcloud secrets list --project western-creek-489616-m3 --format=json`
+5. Inspect existing service accounts
+   - `gcloud iam service-accounts list --project western-creek-489616-m3 --format=json`
+6. Inspect existing buckets
+   - `gcloud storage buckets list --project western-creek-489616-m3 --format=json`
+7. Inspect Firestore database
+   - `gcloud firestore databases describe --database='(default)' --project western-creek-489616-m3 --format=json`
+8. Inspect Firestore composite indexes
+   - `gcloud firestore indexes composite list --project western-creek-489616-m3 --format=json`
+
+Deployment must not continue until this inspection pass is complete.
+
+========================================================================
+2. Minimal-Change Deployment Rules
+========================================================================
+
+Default rule: reuse existing GCP resources whenever they already satisfy the
+app's needs.
+
+Resource reuse policy:
+
+- If the target Cloud Run service already exists, deploy to that service name.
+- If a suitable service account already exists and already has the required
+  permissions, reuse it.
+- If a secret already exists, reuse the same secret name or existing reference
+  rather than inventing a new name.
+- If a bucket already exists and is already intended for this app, reuse it.
+- If the scheduler job already exists, update it instead of creating a second
+  job.
+- If Firestore is present but a query fails because of missing indexes, create
+  only the required index. Do not rename collections or redesign storage.
+
+Avoid these unless truly necessary:
+
+- Renaming Cloud Run services
+- Rotating secret names only for cosmetic consistency
+- Replacing a working service account with a different one
+- Creating a second scheduler job for the same polling endpoint
+- Creating duplicate artifact buckets
+
+========================================================================
+3. Deployment Decision Table
+========================================================================
+
+Use these rules after the inspection pass:
+
+- Existing Cloud Run service found:
+  - Deploy to the existing service.
+- No Cloud Run service found:
+  - Create the service with the documented service name.
+- Existing scheduler job found:
+  - Update the existing job in place.
+- No scheduler job found:
+  - Create the job once.
+- Existing secret found:
+  - Keep using the same secret name or same mounted env var source.
+- No secret found:
+  - Create it only if the app cannot run without it.
+- Existing artifact bucket found:
+  - Reuse it.
+- No artifact bucket found:
+  - Create a dedicated bucket for this app.
+- Firestore query fails due to missing index:
+  - Create the index only.
+
+========================================================================
+4. Current Verified Resources
+========================================================================
+
+- Project ID: `western-creek-489616-m3`
 - Region: recommended `us-central1`
 - Cloud Run service: `gemini-multi-prompt-tts-player`
 - Cloud Scheduler job: `schedule-runner`
 - Cloud Storage bucket: private bucket for WAV and JSON artifacts
+- Current service URL: `https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app`
+- Current runtime service account: `323507996614-compute@developer.gserviceaccount.com`
+- Current alternate Cloud Run URL: `https://gemini-multi-prompt-tts-player-ytzgvkfttq-uc.a.run.app`
+- Current health endpoint: `GET /api/health`
+- Current Firestore due-schedule index requirement:
+  - `schedules(enabled ASC, nextRunAt ASC)`
+- Current scheduler polling:
+  - `*/5 * * * *`
+  - timezone `Europe/Paris`
 
 ========================================================================
-2. Required Secrets
+5. Required Secrets
 ========================================================================
 
-Create or update these secrets in Secret Manager:
+Supported secret/env sources:
 
 - `GEMINI_API_KEY`
 - `APP_ADMIN_PASSWORD`
@@ -31,8 +123,15 @@ Create or update these secrets in Secret Manager:
 `APP_ADMIN_PASSWORD`, but that is only for compatibility and should not be the
 long-term production setup.
 
+Current project note:
+
+- The existing Secret Manager secret `gemini-key` is already available and can
+  be mapped into runtime env var `GEMINI_API_KEY`.
+- The other three values can be provided either via Secret Manager or direct
+  Cloud Run env vars if you are minimizing project changes.
+
 ========================================================================
-3. Required Environment Variables
+6. Required Environment Variables
 ========================================================================
 
 These are the current runtime env vars expected by the app:
@@ -41,6 +140,7 @@ These are the current runtime env vars expected by the app:
 - `APP_DEFAULT_TIMEZONE`
 - `FIRESTORE_COLLECTION_SCHEDULES`
 - `FIRESTORE_COLLECTION_RUNS`
+- `FIRESTORE_COLLECTION_MANUAL_RUNS`
 - `FIRESTORE_COLLECTION_RATE_LIMITS`
 - `CLOUD_SCHEDULER_LOCATION`
 - `CLOUD_SCHEDULER_JOB_NAME`
@@ -51,6 +151,7 @@ Recommended values:
 - `APP_DEFAULT_TIMEZONE=Europe/Paris`
 - `FIRESTORE_COLLECTION_SCHEDULES=schedules`
 - `FIRESTORE_COLLECTION_RUNS=schedule_runs`
+- `FIRESTORE_COLLECTION_MANUAL_RUNS=manual_runs`
 - `FIRESTORE_COLLECTION_RATE_LIMITS=rate_limits`
 - `CLOUD_SCHEDULER_LOCATION=us-central1`
 - `CLOUD_SCHEDULER_JOB_NAME=schedule-runner`
@@ -58,38 +159,49 @@ Recommended values:
 `ALLOWED_ORIGINS` must be a comma-separated allowlist of browser origins that
 are allowed to submit state-changing requests. Example:
 
-`ALLOWED_ORIGINS=https://gemini-multi-prompt-tts-player-7kce3noezq-uc.a.run.app,https://gemini-multi-prompt-tts-player-305416593596.us-central1.run.app`
+`ALLOWED_ORIGINS=https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app,https://gemini-multi-prompt-tts-player-ytzgvkfttq-uc.a.run.app`
 
 ========================================================================
-4. Firestore Notes
+7. Firestore Notes
 ========================================================================
 
 Collections used by the app:
 
 - `schedules`
 - `schedule_runs`
+- `manual_runs`
 - `rate_limits`
 
 You also need the checked-in composite index definition:
 
 - `firestore.indexes.json`
 
+Known failure mode:
+
+- If `POST /api/internal/run-due-schedules` returns `500` and Cloud Run logs show
+  `FAILED_PRECONDITION: The query requires an index`, create the missing
+  composite index before debugging anything else.
+
+Current required command:
+
+`gcloud firestore indexes composite create --project western-creek-489616-m3 --collection-group=schedules --field-config="field-path=enabled,order=ascending" --field-config="field-path=nextRunAt,order=ascending"`
+
 ========================================================================
-5. Cloud Run Deploy Command
+8. Cloud Run Deploy Command
 ========================================================================
 
-Example deploy command:
+Deploy only after the inspection pass above.
+
+If the service already exists, this command updates it in place.
 
 gcloud run deploy gemini-multi-prompt-tts-player ^
   --source . ^
+  --project western-creek-489616-m3 ^
   --region us-central1 ^
   --allow-unauthenticated ^
-  --service-account gemini-tts-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com ^
-  --set-secrets GEMINI_API_KEY=GEMINI_API_KEY:latest ^
-  --set-secrets APP_ADMIN_PASSWORD=APP_ADMIN_PASSWORD:latest ^
-  --set-secrets SCHEDULER_SHARED_SECRET=SCHEDULER_SHARED_SECRET:latest ^
-  --set-secrets ADMIN_SESSION_SECRET=ADMIN_SESSION_SECRET:latest ^
-  --set-env-vars "^@^GCS_BUCKET_NAME=YOUR_BUCKET_NAME@APP_DEFAULT_TIMEZONE=Europe/Paris@FIRESTORE_COLLECTION_SCHEDULES=schedules@FIRESTORE_COLLECTION_RUNS=schedule_runs@FIRESTORE_COLLECTION_RATE_LIMITS=rate_limits@CLOUD_SCHEDULER_LOCATION=us-central1@CLOUD_SCHEDULER_JOB_NAME=schedule-runner@ALLOWED_ORIGINS=https://YOUR_PRIMARY_URL,https://YOUR_SECONDARY_URL" ^
+  --service-account 323507996614-compute@developer.gserviceaccount.com ^
+  --set-secrets GEMINI_API_KEY=gemini-key:latest ^
+  --env-vars-file C:\path\to\cloudrun-env.yaml ^
   --min-instances 1 ^
   --max-instances 10 ^
   --concurrency 80 ^
@@ -99,12 +211,12 @@ gcloud run deploy gemini-multi-prompt-tts-player ^
 Notes:
 
 - Do not set `PORT` in `--set-env-vars`
-- `^@^` is used so `ALLOWED_ORIGINS` can safely contain commas
 - `min-instances=1` reduces cold starts
 - `max-instances=10` is the current scale setting used to handle concurrent scheduled work
+- Do not include `PORT` in `--set-env-vars`; Cloud Run reserves it
 
 ========================================================================
-6. Scheduler Job
+9. Scheduler Job
 ========================================================================
 
 Current internal polling endpoint:
@@ -115,25 +227,40 @@ Required header:
 
 - `X-Internal-Key: YOUR_SCHEDULER_SHARED_SECRET`
 
-Example job creation:
+If the job already exists, update it instead of creating a duplicate.
+
+Example create command:
 
 gcloud scheduler jobs create http schedule-runner ^
+  --project=western-creek-489616-m3 ^
   --location=us-central1 ^
-  --schedule="0 * * * *" ^
+  --schedule="*/5 * * * *" ^
   --time-zone="Europe/Paris" ^
-  --uri="https://YOUR_CLOUD_RUN_URL/api/internal/run-due-schedules" ^
+  --uri="https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app/api/internal/run-due-schedules" ^
   --http-method=POST ^
   --headers="X-Internal-Key=YOUR_SCHEDULER_SHARED_SECRET,Content-Type=application/json" ^
   --message-body="{}"
 
+Example update command:
+
+gcloud scheduler jobs update http schedule-runner ^
+  --project=western-creek-489616-m3 ^
+  --location=us-central1 ^
+  --schedule="*/5 * * * *" ^
+  --time-zone="Europe/Paris" ^
+  --uri="https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app/api/internal/run-due-schedules" ^
+  --update-headers="X-Internal-Key=YOUR_SCHEDULER_SHARED_SECRET,Content-Type=application/json" ^
+  --message-body="{}"
+
 ========================================================================
-7. Security Notes
+10. Security Notes
 ========================================================================
 
 Current production hardening in the app:
 
 - Admin auth uses signed `HttpOnly` cookies
 - Browser write endpoints enforce same-origin CSRF checks via `Origin`/`Referer`
+- Manual generation now runs server-side, so browser refresh does not interrupt in-progress manual runs
 - `/api/artifacts/...` requires admin auth
 - Artifact path traversal is blocked in the storage layer
 - Daily global rate limits are stored in Firestore:
@@ -147,7 +274,7 @@ Limitations:
 - That fallback is only for degraded operation, not the normal production path
 
 ========================================================================
-8. Player Behavior
+11. Player Behavior
 ========================================================================
 
 Current player behavior for scheduled runs:
@@ -163,12 +290,19 @@ Current player behavior for scheduled runs:
 - Cached scheduled audio and text are persisted locally in IndexedDB until manually cleared
 
 ========================================================================
-9. Health Check And Logs
+12. Health Check And Logs
 ========================================================================
 
 Health endpoint:
 
 - `GET /api/health`
+
+Required post-deploy verification commands:
+
+- `Invoke-WebRequest -UseBasicParsing https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app/api/health`
+- `gcloud run services describe gemini-multi-prompt-tts-player --project western-creek-489616-m3 --region us-central1 --format=json`
+- `gcloud scheduler jobs describe schedule-runner --location us-central1 --project western-creek-489616-m3 --format=json`
+- `gcloud scheduler jobs run schedule-runner --location us-central1 --project western-creek-489616-m3`
 
 Read Cloud Run logs:
 
@@ -176,4 +310,4 @@ gcloud run services logs read gemini-multi-prompt-tts-player --region us-central
 
 Describe service:
 
-gcloud run services describe gemini-multi-prompt-tts-player --region us-central1
+gcloud run services describe gemini-multi-prompt-tts-player --project western-creek-489616-m3 --region us-central1

@@ -1,83 +1,15 @@
 import crypto from 'node:crypto';
-import { generateGroundedText, generateSpeechBase64 } from './gemini.js';
-import { mergePcmBase64ToWavBuffer } from '../utils/pcmToWav.js';
 import { computeNextRunAt, interpolatePromptTemplate } from '../utils/time.js';
 import { recordRun, tryLockSchedule, updateNextRun } from './scheduleStore.js';
 import { saveAudio, saveTextArtifact } from './resultStore.js';
 import { logError, logInfo, logWarn } from '../utils/logger.js';
-import { splitTextForTTS } from '../utils/ttsChunks.js';
+import { generateRunArtifacts } from './contentGeneration.js';
 
 const LOCK_WINDOW_MS = 15 * 60 * 1000;
-const TOTAL_ATTEMPTS = 4;
-const BASE_RETRY_DELAY_MS = 1000;
 const DEFAULT_TOOL_OPTIONS = {
   enableGoogleSearch: true,
   enableUrlContext: false,
 };
-const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-async function runWithAttemptLogging(operation, context) {
-  const {
-    operationType,
-    scheduleId,
-    runId,
-    partIndex,
-    partCount,
-  } = context;
-
-  for (let attempt = 1; attempt <= TOTAL_ATTEMPTS; attempt += 1) {
-    logInfo('scheduleRunner', `${operationType}.attempt.start`, {
-      scheduleId,
-      runId,
-      attempt,
-      totalAttempts: TOTAL_ATTEMPTS,
-      partIndex,
-      partCount,
-    });
-    try {
-      const result = await operation();
-      logInfo('scheduleRunner', `${operationType}.attempt.success`, {
-        scheduleId,
-        runId,
-        attempt,
-        totalAttempts: TOTAL_ATTEMPTS,
-        partIndex,
-        partCount,
-      });
-      return result;
-    } catch (error) {
-      const message = error?.message || 'Unknown error';
-      if (attempt >= TOTAL_ATTEMPTS) {
-        logError('scheduleRunner', `${operationType}.attempt.give_up`, {
-          scheduleId,
-          runId,
-          attempt,
-          totalAttempts: TOTAL_ATTEMPTS,
-          partIndex,
-          partCount,
-          error,
-        });
-        if (operationType === 'text') {
-          throw new Error(`Text generation failed after ${TOTAL_ATTEMPTS} attempts: ${message}`);
-        }
-        throw new Error(`TTS failed for Part ${partIndex}/${partCount} after ${TOTAL_ATTEMPTS} attempts: ${message}`);
-      }
-
-      const delayMs = BASE_RETRY_DELAY_MS * (2 ** (attempt - 1));
-      logWarn('scheduleRunner', `${operationType}.attempt.retry`, {
-        scheduleId,
-        runId,
-        attempt,
-        totalAttempts: TOTAL_ATTEMPTS,
-        delayMs,
-        partIndex,
-        partCount,
-        error,
-      });
-      await wait(delayMs);
-    }
-  }
-}
 
 export async function executeSchedule(schedule, options = {}) {
   const startedAt = new Date().toISOString();
@@ -113,99 +45,20 @@ export async function executeSchedule(schedule, options = {}) {
   });
 
   try {
-    const { text, groundingLinks } = await runWithAttemptLogging(
-      () =>
-        generateGroundedText(resolvedPrompt, toolOptions, {
-          retryOptions: { totalAttempts: 1 },
-        }),
-      {
-        operationType: 'text',
-        scheduleId: schedule.id,
-        runId,
-      }
-    );
-    logInfo('scheduleRunner', 'text.generated', {
-      scheduleId: schedule.id,
+    const artifacts = await generateRunArtifacts({
+      ownerType: 'schedule',
+      ownerId: schedule.id,
       runId,
-      textLength: text.length,
-      links: groundingLinks.length,
-    });
-    const ttsChunks = splitTextForTTS(text);
-    logInfo('scheduleRunner', 'audio.chunking.complete', {
-      scheduleId: schedule.id,
-      runId,
-      chunkCount: ttsChunks.length,
-    });
-    const audioChunks = [];
-
-    for (const chunk of ttsChunks) {
-      const chunkRunId = runId;
-      logInfo('scheduleRunner', 'audio.part.start', {
-        scheduleId: schedule.id,
-        runId: chunkRunId,
-        partIndex: chunk.partIndex,
-        partCount: chunk.partCount,
-        chunkLength: chunk.text.length,
-      });
-      try {
-        const audioBase64 = await runWithAttemptLogging(
-          () =>
-            generateSpeechBase64(chunk.text, schedule.ttsModel, {
-              retryOptions: { totalAttempts: 1 },
-            }),
-          {
-            operationType: 'audio',
-            scheduleId: schedule.id,
-            runId: chunkRunId,
-            partIndex: chunk.partIndex,
-            partCount: chunk.partCount,
-          }
-        );
-        logInfo('scheduleRunner', 'audio.generated', {
-          scheduleId: schedule.id,
-          runId: chunkRunId,
-          partIndex: chunk.partIndex,
-          partCount: chunk.partCount,
-          audioBase64Length: audioBase64.length,
-          model: schedule.ttsModel,
-        });
-        audioChunks.push(audioBase64);
-        logInfo('scheduleRunner', 'audio.part.buffered', {
-          scheduleId: schedule.id,
-          runId: chunkRunId,
-          partIndex: chunk.partIndex,
-          partCount: chunk.partCount,
-          bufferedParts: audioChunks.length,
-        });
-      } catch (partError) {
-        logError('scheduleRunner', 'audio.part.error', {
-          scheduleId: schedule.id,
-          runId: chunkRunId,
-          partIndex: chunk.partIndex,
-          partCount: chunk.partCount,
-          error: partError,
-        });
-        throw partError;
-      }
-    }
-
-    logInfo('scheduleRunner', 'audio.merge.start', {
-      scheduleId: schedule.id,
-      runId,
-      chunkCount: audioChunks.length,
-    });
-    const wavBuffer = mergePcmBase64ToWavBuffer(audioChunks);
-    logInfo('scheduleRunner', 'audio.merge.success', {
-      scheduleId: schedule.id,
-      runId,
-      wavBytes: wavBuffer.length,
+      prompt: resolvedPrompt,
+      ttsModel: schedule.ttsModel,
+      toolOptions,
     });
     const audioInfo = await saveAudio({
       scheduleId: schedule.id,
       runId,
       startedAt,
       outputPrefix: schedule.outputPrefix,
-      wavBuffer,
+      wavBuffer: artifacts.wavBuffer,
     });
     const finishedAt = new Date().toISOString();
     const textInfo = await saveTextArtifact({
@@ -219,11 +72,11 @@ export async function executeSchedule(schedule, options = {}) {
         startedAt,
         finishedAt,
         resolvedPrompt,
-        generatedText: text,
-        groundingLinks,
+        generatedText: artifacts.text,
+        groundingLinks: artifacts.groundingLinks,
         ttsModel: schedule.ttsModel,
-        toolOptions,
-        chunkCount: ttsChunks.length,
+        toolOptions: artifacts.toolOptions,
+        chunkCount: artifacts.chunkCount,
         audioPath: audioInfo.audioPath,
       },
     });
@@ -235,8 +88,8 @@ export async function executeSchedule(schedule, options = {}) {
       status: 'success',
       triggeredBy,
       resolvedPrompt,
-      generatedText: text,
-      groundingLinks,
+      generatedText: artifacts.text,
+      groundingLinks: artifacts.groundingLinks,
       audioPath: audioInfo.audioPath,
       textPath: textInfo.textPath,
       audioDownloadUrl: audioInfo.audioDownloadUrl,

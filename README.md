@@ -258,10 +258,16 @@ Deployment reference:
 
 - [google-cloud-deploy-guide.txt](./google-cloud-deploy-guide.txt)
 
+Before any production deploy, first inspect the existing Google Cloud resources
+in the target project. The deployment guide now treats this inspection pass as
+mandatory and follows a minimal-change policy: reuse existing Cloud Run
+services, service accounts, secrets, buckets, scheduler jobs, and Firestore
+where possible, then create only what is missing.
+
 Current production architecture:
 
 - Cloud Run for the web app and API
-- Firestore for schedules, runs, and global rate-limit counters
+- Firestore for schedules, scheduled runs, manual async runs, and global rate-limit counters
 - Google Cloud Storage for scheduled WAV and JSON artifacts
 - Cloud Scheduler for polling due schedules
 
@@ -272,6 +278,7 @@ Important runtime variables:
 - `SCHEDULER_SHARED_SECRET`
 - `ALLOWED_ORIGINS`
 - `GCS_BUCKET_NAME`
+- `FIRESTORE_COLLECTION_MANUAL_RUNS`
 - `FIRESTORE_COLLECTION_RATE_LIMITS`
 
 ### Security Notes
