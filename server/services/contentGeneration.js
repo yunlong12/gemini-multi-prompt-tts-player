@@ -5,12 +5,23 @@ import { logError, logInfo, logWarn } from '../utils/logger.js';
 
 const TOTAL_ATTEMPTS = 4;
 const BASE_RETRY_DELAY_MS = 1000;
+const DEFAULT_TTS_CHUNK_CONCURRENCY = 2;
+const MAX_TTS_CHUNK_CONCURRENCY = 4;
 const DEFAULT_TOOL_OPTIONS = {
   enableGoogleSearch: true,
   enableUrlContext: false,
 };
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function getTtsChunkConcurrency() {
+  const rawValue = Number(process.env.TTS_CHUNK_CONCURRENCY || DEFAULT_TTS_CHUNK_CONCURRENCY);
+  if (!Number.isFinite(rawValue)) {
+    return DEFAULT_TTS_CHUNK_CONCURRENCY;
+  }
+
+  return Math.max(1, Math.min(MAX_TTS_CHUNK_CONCURRENCY, Math.floor(rawValue)));
+}
 
 async function runWithAttemptLogging(operation, context) {
   const { operationType, ownerType, ownerId, runId, partIndex, partCount } = context;
@@ -73,6 +84,81 @@ async function runWithAttemptLogging(operation, context) {
   }
 }
 
+async function generateAudioChunksInParallel({ ttsChunks, ttsModel, ownerType, ownerId, runId }) {
+  const concurrency = getTtsChunkConcurrency();
+  const audioChunks = new Array(ttsChunks.length);
+  let nextIndex = 0;
+
+  logInfo('contentGeneration', 'audio.parallel.start', {
+    ownerType,
+    ownerId,
+    runId,
+    chunkCount: ttsChunks.length,
+    concurrency,
+  });
+
+  const worker = async (workerIndex) => {
+    while (true) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      if (currentIndex >= ttsChunks.length) {
+        return;
+      }
+
+      const chunk = ttsChunks[currentIndex];
+      logInfo('contentGeneration', 'audio.part.start', {
+        ownerType,
+        ownerId,
+        runId,
+        partIndex: chunk.partIndex,
+        partCount: chunk.partCount,
+        chunkLength: chunk.text.length,
+        workerIndex,
+      });
+
+      const audioBase64 = await runWithAttemptLogging(
+        () =>
+          generateSpeechBase64(chunk.text, ttsModel, {
+            retryOptions: { totalAttempts: 1 },
+          }),
+        {
+          operationType: 'audio',
+          ownerType,
+          ownerId,
+          runId,
+          partIndex: chunk.partIndex,
+          partCount: chunk.partCount,
+        }
+      );
+
+      audioChunks[currentIndex] = audioBase64;
+      logInfo('contentGeneration', 'audio.part.buffered', {
+        ownerType,
+        ownerId,
+        runId,
+        partIndex: chunk.partIndex,
+        partCount: chunk.partCount,
+        bufferedParts: audioChunks.filter(Boolean).length,
+        model: ttsModel,
+        workerIndex,
+      });
+    }
+  };
+
+  const workerCount = Math.min(concurrency, ttsChunks.length);
+  await Promise.all(Array.from({ length: workerCount }, (_, index) => worker(index + 1)));
+
+  logInfo('contentGeneration', 'audio.parallel.complete', {
+    ownerType,
+    ownerId,
+    runId,
+    chunkCount: ttsChunks.length,
+    concurrency: workerCount,
+  });
+
+  return audioChunks;
+}
+
 export async function generateRunArtifacts({
   ownerType,
   ownerId,
@@ -120,42 +206,13 @@ export async function generateRunArtifacts({
     chunkCount: ttsChunks.length,
   });
 
-  const audioChunks = [];
-  for (const chunk of ttsChunks) {
-    logInfo('contentGeneration', 'audio.part.start', {
-      ownerType,
-      ownerId,
-      runId,
-      partIndex: chunk.partIndex,
-      partCount: chunk.partCount,
-      chunkLength: chunk.text.length,
-    });
-    const audioBase64 = await runWithAttemptLogging(
-      () =>
-        generateSpeechBase64(chunk.text, ttsModel, {
-          retryOptions: { totalAttempts: 1 },
-        }),
-      {
-        operationType: 'audio',
-        ownerType,
-        ownerId,
-        runId,
-        partIndex: chunk.partIndex,
-        partCount: chunk.partCount,
-      }
-    );
-
-    audioChunks.push(audioBase64);
-    logInfo('contentGeneration', 'audio.part.buffered', {
-      ownerType,
-      ownerId,
-      runId,
-      partIndex: chunk.partIndex,
-      partCount: chunk.partCount,
-      bufferedParts: audioChunks.length,
-      model: ttsModel,
-    });
-  }
+  const audioChunks = await generateAudioChunksInParallel({
+    ttsChunks,
+    ttsModel,
+    ownerType,
+    ownerId,
+    runId,
+  });
 
   const wavBuffer = mergePcmBase64ToWavBuffer(audioChunks);
   logInfo('contentGeneration', 'audio.merge.success', {
