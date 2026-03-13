@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Loader2, CheckCircle, AlertCircle, Volume2, Globe, Clock3 } from 'lucide-react';
 import { ItemStatus, ProcessItem } from '../types';
 import { formatPartLabel } from '../utils/ttsChunks';
@@ -9,7 +9,37 @@ interface ResultCardProps {
 }
 
 export const ResultCard: React.FC<ResultCardProps> = ({ item, isActive }) => {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [isCollapsible, setIsCollapsible] = useState(false);
+  const clampedMeasureRef = useRef<HTMLDivElement | null>(null);
+  const fullMeasureRef = useRef<HTMLDivElement | null>(null);
   const partLabel = formatPartLabel(item.partIndex, item.partCount);
+
+  useEffect(() => {
+    setIsExpanded(false);
+  }, [item.id, item.answer]);
+
+  useEffect(() => {
+    if (!item.answer) {
+      setIsCollapsible(false);
+      return;
+    }
+
+    const measure = () => {
+      const clampedHeight = clampedMeasureRef.current?.getBoundingClientRect().height ?? 0;
+      const fullHeight = fullMeasureRef.current?.getBoundingClientRect().height ?? 0;
+      setIsCollapsible(fullHeight - clampedHeight > 4);
+    };
+
+    const frameId = window.requestAnimationFrame(measure);
+    window.addEventListener('resize', measure);
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      window.removeEventListener('resize', measure);
+    };
+  }, [item.answer]);
+
   const getStatusIcon = () => {
     switch (item.status) {
       case ItemStatus.QUEUED:
@@ -54,8 +84,40 @@ export const ResultCard: React.FC<ResultCardProps> = ({ item, isActive }) => {
       </div>
 
       {item.answer && (
-        <div className="text-slate-300 text-sm leading-relaxed mb-4 p-3 bg-slate-900/50 rounded-md">
-          {item.answer}
+        <div className="mb-4">
+          <div className="relative p-3 bg-slate-900/50 rounded-md border border-slate-800/80 overflow-hidden">
+            <div className={`text-slate-300 text-sm leading-relaxed whitespace-pre-wrap break-words ${isExpanded ? '' : 'line-clamp-10'}`}>
+              {item.answer}
+            </div>
+            {!isExpanded && isCollapsible && (
+              <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-slate-900/95 via-slate-900/70 to-transparent" />
+            )}
+          </div>
+          {isCollapsible && (
+            <div className="mt-2 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setIsExpanded((current) => !current)}
+                className="text-xs font-semibold uppercase tracking-wide text-cyan-300 hover:text-cyan-200 transition-colors"
+              >
+                {isExpanded ? '收起正文' : '展开正文'}
+              </button>
+            </div>
+          )}
+          <div className="absolute inset-x-0 top-0 h-0 -z-10 pointer-events-none opacity-0 overflow-hidden" aria-hidden="true">
+            <div
+              ref={clampedMeasureRef}
+              className="text-sm leading-relaxed whitespace-pre-wrap break-words line-clamp-10 p-3"
+            >
+              {item.answer}
+            </div>
+            <div
+              ref={fullMeasureRef}
+              className="text-sm leading-relaxed whitespace-pre-wrap break-words p-3"
+            >
+              {item.answer}
+            </div>
+          </div>
         </div>
       )}
 
