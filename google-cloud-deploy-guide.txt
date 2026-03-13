@@ -124,6 +124,7 @@ URL usage policy:
 Supported secret/env sources:
 
 - `GEMINI_API_KEY`
+- `GEMINI_API_KEYS`
 - `APP_ADMIN_PASSWORD`
 - `SCHEDULER_SHARED_SECRET`
 - `ADMIN_SESSION_SECRET`
@@ -136,6 +137,8 @@ Current project note:
 
 - The existing Secret Manager secret `gemini-key` is already available and can
   be mapped into runtime env var `GEMINI_API_KEY`.
+- If you want primary/backup Gemini failover, provide `GEMINI_API_KEYS` as a
+  comma-separated env var or inject an equivalent value from Secret Manager.
 - The other three values can be provided either via Secret Manager or direct
   Cloud Run env vars if you are minimizing project changes.
 
@@ -154,6 +157,7 @@ These are the current runtime env vars expected by the app:
 - `CLOUD_SCHEDULER_LOCATION`
 - `CLOUD_SCHEDULER_JOB_NAME`
 - `ALLOWED_ORIGINS`
+- `TTS_CHUNK_CONCURRENCY`
 
 Recommended values:
 
@@ -162,7 +166,7 @@ Recommended values:
 - `FIRESTORE_COLLECTION_RUNS=schedule_runs`
 - `FIRESTORE_COLLECTION_MANUAL_RUNS=manual_runs`
 - `FIRESTORE_COLLECTION_RATE_LIMITS=rate_limits`
-- `TTS_CHUNK_CONCURRENCY=2`
+- `TTS_CHUNK_CONCURRENCY=3`
 - `CLOUD_SCHEDULER_LOCATION=us-central1`
 - `CLOUD_SCHEDULER_JOB_NAME=schedule-runner`
 
@@ -170,6 +174,8 @@ Recommended values:
 are allowed to submit state-changing requests. Example:
 
 `ALLOWED_ORIGINS=https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app`
+
+If both are present, `GEMINI_API_KEYS` takes precedence over `GEMINI_API_KEY`.
 
 ========================================================================
 7. Firestore Notes

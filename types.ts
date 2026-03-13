@@ -10,6 +10,11 @@ export interface GeminiToolOptions {
 
 export type ManualRunStatus = 'queued' | 'generating_text' | 'generating_audio' | 'success' | 'error';
 
+export interface ManualRunProgressEntry {
+  ts: string;
+  message: string;
+}
+
 export enum ItemStatus {
   QUEUED = 'QUEUED',
   IDLE = 'IDLE',
@@ -130,6 +135,7 @@ export interface ManualRun {
   audioDownloadUrl?: string;
   textPath?: string;
   errorMessage?: string;
+  progressLogs?: ManualRunProgressEntry[];
   createdAt: string;
   updatedAt: string;
   finishedAt?: string;

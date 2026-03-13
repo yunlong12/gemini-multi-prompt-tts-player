@@ -148,6 +148,8 @@ const App: React.FC = () => {
   const scheduledPrefetchRunningRef = useRef(false);
   const scheduledPrefetchCycleRef = useRef(0);
   const manualAudioLoadPromisesRef = useRef<Record<string, Promise<AudioBuffer | null>>>({});
+  const manualRunProgressCursorRef = useRef<Record<string, number>>({});
+  const hasInitializedManualRunProgressRef = useRef(false);
 
   const addLog = (msg: string) => setLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
   const promptSnippet = (value: string, max = 72) => {
@@ -291,12 +293,14 @@ const App: React.FC = () => {
     if (!isAdminAuthenticated) {
       setItems([]);
       itemsRef.current = [];
+      manualRunProgressCursorRef.current = {};
+      hasInitializedManualRunProgressRef.current = false;
       return;
     }
 
-    void refreshManualRuns(true);
+    void refreshManualRuns(true, false);
     const intervalId = window.setInterval(() => {
-      void refreshManualRuns();
+      void refreshManualRuns(false, true);
     }, MANUAL_RUN_POLL_INTERVAL_MS);
 
     return () => window.clearInterval(intervalId);
@@ -419,13 +423,36 @@ const App: React.FC = () => {
       return nextItems.sort((a, b) => b.timestamp - a.timestamp || (a.partIndex || 1) - (b.partIndex || 1));
     });
   };
-  const refreshManualRuns = async (logLabel = false) => {
+  const syncManualRunProgressLogs = (manualRuns: ManualRun[], emitNewLogs: boolean) => {
+    const nextCursor: Record<string, number> = {};
+    for (const run of manualRuns) {
+      const progressLogs = Array.isArray(run.progressLogs) ? run.progressLogs : [];
+      const previousCursor = manualRunProgressCursorRef.current[run.id];
+      const startIndex =
+        emitNewLogs && hasInitializedManualRunProgressRef.current && typeof previousCursor === 'number'
+          ? previousCursor
+          : progressLogs.length;
+
+      for (const entry of progressLogs.slice(startIndex)) {
+        addLog(`[Manual ${itemIdLabel(run.id)}] ${entry.message}`);
+      }
+
+      nextCursor[run.id] = progressLogs.length;
+    }
+
+    manualRunProgressCursorRef.current = nextCursor;
+    if (!hasInitializedManualRunProgressRef.current) {
+      hasInitializedManualRunProgressRef.current = true;
+    }
+  };
+  const refreshManualRuns = async (logLabel = false, emitProgressLogs = false) => {
     if (!isAdminAuthenticated) {
       return;
     }
     try {
       const manualRuns = await fetchManualRuns(100);
       syncManualRuns(manualRuns);
+      syncManualRunProgressLogs(manualRuns, emitProgressLogs);
       if (logLabel) {
         addLog(`[Manual] Refreshed ${manualRuns.length} manual run(s).`);
       }
@@ -741,7 +768,7 @@ const App: React.FC = () => {
       ]);
       setSelectedItemId((prev) => prev || createdRuns[0]?.id || null);
       createdRuns.forEach((run) => logState(`Manual run ${itemIdLabel(run.id)} queued. Prompt="${promptSnippet(run.prompt)}".`));
-      await refreshManualRuns(true);
+      await refreshManualRuns(true, true);
     } catch (error: any) {
       addLog(`[Manual] Failed to submit prompts: ${error?.message || error}`);
       if (isRateLimitError(error)) {

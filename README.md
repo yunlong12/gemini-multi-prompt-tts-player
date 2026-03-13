@@ -220,6 +220,7 @@ cp .env.example .env.local
 Set at least these values in `.env.local`:
 
 - `GEMINI_API_KEY`
+- `GEMINI_API_KEYS`
 - `APP_ADMIN_PASSWORD`
 - `ADMIN_SESSION_SECRET`
 - `SCHEDULER_SHARED_SECRET`
@@ -286,6 +287,8 @@ Current production architecture:
 
 Important runtime variables:
 
+- `GEMINI_API_KEY`
+- `GEMINI_API_KEYS`
 - `ADMIN_SESSION_SECRET`
 - `APP_ADMIN_PASSWORD`
 - `SCHEDULER_SHARED_SECRET`
@@ -294,6 +297,11 @@ Important runtime variables:
 - `FIRESTORE_COLLECTION_MANUAL_RUNS`
 - `FIRESTORE_COLLECTION_RATE_LIMITS`
 - `TTS_CHUNK_CONCURRENCY`
+
+`GEMINI_API_KEYS` is a comma-separated primary/backup list. If it is set, the
+server will use it first and fail over to the next key on retryable Gemini
+quota/overload errors. If it is unset, the server falls back to
+`GEMINI_API_KEY`.
 
 ### Security Notes
 

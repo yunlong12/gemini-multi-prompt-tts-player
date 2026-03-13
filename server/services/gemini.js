@@ -12,21 +12,103 @@ const DEFAULT_TOOL_OPTIONS = {
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-let aiClient = null;
+const aiClientsByKey = new Map();
 
-const getAI = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error('Missing GEMINI_API_KEY in environment.');
+function getConfiguredApiKeys() {
+  const multiKeyValue = String(process.env.GEMINI_API_KEYS || '').trim();
+  const singleKeyValue = String(process.env.GEMINI_API_KEY || '').trim();
+  const keys = (multiKeyValue
+    ? multiKeyValue.split(',').map((value) => value.trim()).filter(Boolean)
+    : [singleKeyValue].filter(Boolean));
+
+  if (!keys.length) {
+    throw new Error('Missing GEMINI_API_KEY or GEMINI_API_KEYS in environment.');
   }
 
-  if (!aiClient) {
-    aiClient = new GoogleGenAI({ apiKey });
-    logInfo('gemini', 'client.created');
+  return Array.from(new Set(keys));
+}
+
+function getAIForKey(apiKey, keyIndex) {
+  if (!aiClientsByKey.has(apiKey)) {
+    aiClientsByKey.set(apiKey, new GoogleGenAI({ apiKey }));
+    logInfo('gemini', 'client.created', { keyIndex });
   }
 
-  return aiClient;
-};
+  return aiClientsByKey.get(apiKey);
+}
+
+function isRetryableGeminiError(error) {
+  const message = String(error?.message || '').toLowerCase();
+  const status = Number(error?.status || error?.error?.code || 0);
+  return (
+    status === 429 ||
+    status === 503 ||
+    message.includes('429') ||
+    message.includes('503') ||
+    message.includes('overloaded') ||
+    message.includes('quota')
+  );
+}
+
+async function runWithKeyFailover(operationFactory, context = {}) {
+  const keys = getConfiguredApiKeys();
+  const { scope = 'unknown', model = 'unknown', requestMeta = {}, retryOptions } = context;
+  let lastError = null;
+
+  for (let index = 0; index < keys.length; index += 1) {
+    const keyNumber = index + 1;
+    const totalKeys = keys.length;
+    const ai = getAIForKey(keys[index], keyNumber);
+
+    logInfo('gemini', 'key.attempt.start', {
+      scope,
+      model,
+      keyIndex: keyNumber,
+      totalKeys,
+      ...requestMeta,
+    });
+
+    try {
+      const result = await retryWithBackoff(() => operationFactory(ai), retryOptions);
+      logInfo('gemini', 'key.attempt.success', {
+        scope,
+        model,
+        keyIndex: keyNumber,
+        totalKeys,
+        ...requestMeta,
+      });
+      return result;
+    } catch (error) {
+      lastError = error;
+      const retryable = isRetryableGeminiError(error);
+      const hasFallback = index < keys.length - 1;
+
+      logWarn('gemini', retryable && hasFallback ? 'key.switch' : 'key.attempt.failed', {
+        scope,
+        model,
+        keyIndex: keyNumber,
+        totalKeys,
+        retryable,
+        willSwitch: Boolean(retryable && hasFallback),
+        error,
+        ...requestMeta,
+      });
+
+      if (!retryable || !hasFallback) {
+        break;
+      }
+    }
+  }
+
+  logError('gemini', 'key.exhausted', {
+    scope,
+    model,
+    totalKeys: getConfiguredApiKeys().length,
+    error: lastError,
+    ...requestMeta,
+  });
+  throw lastError;
+}
 
 export async function retryWithBackoff(operation, retries = 3, delay = 1000) {
   const retryConfig =
@@ -126,15 +208,23 @@ export async function generateGroundedText(prompt, toolOptions = {}, runtimeOpti
   const normalizedToolOptions = normalizeToolOptions(toolOptions);
   const tools = buildGeminiTools(normalizedToolOptions);
   logInfo('gemini.text', 'request.start', { promptLength: prompt.length, model: TEXT_MODEL, ...normalizedToolOptions });
-  const ai = getAI();
-  const response = await retryWithBackoff(
-    () =>
+  const response = await runWithKeyFailover(
+    (ai) =>
       ai.models.generateContent({
         model: TEXT_MODEL,
         contents: prompt,
         config: tools.length > 0 ? { tools } : undefined,
       }),
-    runtimeOptions.retryOptions
+    {
+      scope: 'text',
+      model: TEXT_MODEL,
+      retryOptions: runtimeOptions.retryOptions,
+      requestMeta: {
+        promptLength: prompt.length,
+        enableGoogleSearch: normalizedToolOptions.enableGoogleSearch,
+        enableUrlContext: normalizedToolOptions.enableUrlContext,
+      },
+    }
   );
 
   const text = String(response.text || '').trim();
@@ -178,11 +268,10 @@ export async function generateSpeechBase64(text, model = DEFAULT_TTS_MODEL, runt
     model,
   });
 
-  const ai = getAI();
   let response;
   try {
-    response = await retryWithBackoff(
-      () =>
+    response = await runWithKeyFailover(
+      (ai) =>
         ai.models.generateContent({
           model,
           contents: [{ parts: [{ text: promptWithStyle }] }],
@@ -195,7 +284,16 @@ export async function generateSpeechBase64(text, model = DEFAULT_TTS_MODEL, runt
             },
           },
         }),
-      runtimeOptions.retryOptions
+      {
+        scope: 'tts',
+        model,
+        retryOptions: runtimeOptions.retryOptions,
+        requestMeta: {
+          inputLength: text.length,
+          cleanedLength: cleanedText.length,
+          boundedLength: boundedText.length,
+        },
+      }
     );
   } catch (error) {
     logError('gemini.tts', 'request.error', {

@@ -8,6 +8,24 @@ const queuedRunIds = [];
 const queuedRunIdSet = new Set();
 let workerActive = false;
 
+async function appendProgressLog(runId, message) {
+  const run = await getManualRun(runId);
+  if (!run) {
+    return null;
+  }
+
+  const progressLogs = Array.isArray(run.progressLogs) ? run.progressLogs : [];
+  return updateManualRun(runId, {
+    progressLogs: [
+      ...progressLogs,
+      {
+        ts: new Date().toISOString(),
+        message,
+      },
+    ],
+  });
+}
+
 async function processRun(runId) {
   const run = await getManualRun(runId);
   if (!run) {
@@ -27,6 +45,12 @@ async function processRun(runId) {
       status: 'generating_text',
       errorMessage: '',
       finishedAt: null,
+      progressLogs: [
+        {
+          ts: new Date().toISOString(),
+          message: 'Manual run started.',
+        },
+      ],
     });
 
     const artifacts = await generateRunArtifacts({
@@ -44,9 +68,13 @@ async function processRun(runId) {
           errorMessage: '',
         });
       },
+      onProgress: async ({ message }) => {
+        await appendProgressLog(runId, message);
+      },
     });
 
     const startedAt = run.createdAt || new Date().toISOString();
+    await appendProgressLog(runId, 'Uploading merged audio.');
     const audioInfo = await saveAudio({
       scheduleId: 'manual',
       runId,
@@ -55,6 +83,7 @@ async function processRun(runId) {
       wavBuffer: artifacts.wavBuffer,
     });
     const finishedAt = new Date().toISOString();
+    await appendProgressLog(runId, 'Saving transcript artifact.');
     const textInfo = await saveTextArtifact({
       scheduleId: 'manual',
       runId,
@@ -73,6 +102,7 @@ async function processRun(runId) {
         finishedAt,
       },
     });
+    await appendProgressLog(runId, 'Manual run completed successfully.');
 
     const updated = await updateManualRun(runId, {
       status: 'success',
@@ -95,6 +125,7 @@ async function processRun(runId) {
       errorMessage: message,
       finishedAt,
     });
+    await appendProgressLog(runId, `Manual run failed: ${message}`);
     logError('manualRunRunner', 'run.error', { runId, error });
     return updated;
   }

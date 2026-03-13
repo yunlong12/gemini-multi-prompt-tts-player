@@ -5,7 +5,7 @@ import { logError, logInfo, logWarn } from '../utils/logger.js';
 
 const TOTAL_ATTEMPTS = 4;
 const BASE_RETRY_DELAY_MS = 1000;
-const DEFAULT_TTS_CHUNK_CONCURRENCY = 2;
+const DEFAULT_TTS_CHUNK_CONCURRENCY = 3;
 const MAX_TTS_CHUNK_CONCURRENCY = 4;
 const DEFAULT_TOOL_OPTIONS = {
   enableGoogleSearch: true,
@@ -84,7 +84,7 @@ async function runWithAttemptLogging(operation, context) {
   }
 }
 
-async function generateAudioChunksInParallel({ ttsChunks, ttsModel, ownerType, ownerId, runId }) {
+async function generateAudioChunksInParallel({ ttsChunks, ttsModel, ownerType, ownerId, runId, onProgress }) {
   const concurrency = getTtsChunkConcurrency();
   const audioChunks = new Array(ttsChunks.length);
   let nextIndex = 0;
@@ -115,6 +115,14 @@ async function generateAudioChunksInParallel({ ttsChunks, ttsModel, ownerType, o
         chunkLength: chunk.text.length,
         workerIndex,
       });
+      if (onProgress) {
+        await onProgress({
+          stage: 'audio.part.start',
+          message: `Part ${chunk.partIndex}/${chunk.partCount} audio generation started.`,
+          partIndex: chunk.partIndex,
+          partCount: chunk.partCount,
+        });
+      }
 
       const audioBase64 = await runWithAttemptLogging(
         () =>
@@ -142,6 +150,14 @@ async function generateAudioChunksInParallel({ ttsChunks, ttsModel, ownerType, o
         model: ttsModel,
         workerIndex,
       });
+      if (onProgress) {
+        await onProgress({
+          stage: 'audio.part.buffered',
+          message: `Part ${chunk.partIndex}/${chunk.partCount} audio ready.`,
+          partIndex: chunk.partIndex,
+          partCount: chunk.partCount,
+        });
+      }
     }
   };
 
@@ -167,11 +183,19 @@ export async function generateRunArtifacts({
   ttsModel,
   toolOptions = {},
   onTextReady,
+  onProgress,
 }) {
   const normalizedToolOptions = {
     enableGoogleSearch: toolOptions.enableGoogleSearch ?? DEFAULT_TOOL_OPTIONS.enableGoogleSearch,
     enableUrlContext: toolOptions.enableUrlContext ?? DEFAULT_TOOL_OPTIONS.enableUrlContext,
   };
+
+  if (onProgress) {
+    await onProgress({
+      stage: 'text.start',
+      message: 'Text generation started.',
+    });
+  }
 
   const { text, groundingLinks } = await runWithAttemptLogging(
     () =>
@@ -194,6 +218,13 @@ export async function generateRunArtifacts({
     links: groundingLinks.length,
   });
 
+  if (onProgress) {
+    await onProgress({
+      stage: 'text.generated',
+      message: `Text generated (${text.length} chars).`,
+    });
+  }
+
   if (onTextReady) {
     await onTextReady({ text, groundingLinks, toolOptions: normalizedToolOptions });
   }
@@ -206,13 +237,32 @@ export async function generateRunArtifacts({
     chunkCount: ttsChunks.length,
   });
 
+  if (onProgress) {
+    await onProgress({
+      stage: 'audio.chunking.complete',
+      message: `Audio split into ${ttsChunks.length} part(s).`,
+    });
+    await onProgress({
+      stage: 'audio.parallel.start',
+      message: `Audio generation started with concurrency ${getTtsChunkConcurrency()}.`,
+    });
+  }
+
   const audioChunks = await generateAudioChunksInParallel({
     ttsChunks,
     ttsModel,
     ownerType,
     ownerId,
     runId,
+    onProgress,
   });
+
+  if (onProgress) {
+    await onProgress({
+      stage: 'audio.merge.start',
+      message: 'All parts generated. Merging audio.',
+    });
+  }
 
   const wavBuffer = mergePcmBase64ToWavBuffer(audioChunks);
   logInfo('contentGeneration', 'audio.merge.success', {
@@ -221,6 +271,13 @@ export async function generateRunArtifacts({
     runId,
     wavBytes: wavBuffer.length,
   });
+
+  if (onProgress) {
+    await onProgress({
+      stage: 'audio.merge.success',
+      message: 'Audio merge completed.',
+    });
+  }
 
   return {
     text,

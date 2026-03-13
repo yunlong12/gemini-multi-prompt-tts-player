@@ -13,6 +13,7 @@ const localDbPath = path.join(dataDir, 'runtime-db.json');
 
 const manualRunsCollection = process.env.FIRESTORE_COLLECTION_MANUAL_RUNS || 'manual_runs';
 const useFirestore = !process.env.DISABLE_FIRESTORE;
+const MAX_PROGRESS_LOGS = 200;
 
 let firestore = null;
 
@@ -74,6 +75,9 @@ function normalizeToolOptions(toolOptions = {}, existing = {}) {
 function normalizeManualRun(input, existing = null) {
   const now = new Date().toISOString();
   const toolOptions = normalizeToolOptions(input.toolOptions || input, existing?.toolOptions || {});
+  const progressLogs = Array.isArray(input.progressLogs)
+    ? input.progressLogs
+    : (existing?.progressLogs || []);
 
   return {
     id: input.id || existing?.id || crypto.randomUUID(),
@@ -87,6 +91,14 @@ function normalizeManualRun(input, existing = null) {
     audioDownloadUrl: input.audioDownloadUrl ?? existing?.audioDownloadUrl ?? '',
     textPath: input.textPath ?? existing?.textPath ?? '',
     errorMessage: input.errorMessage ?? existing?.errorMessage ?? '',
+    progressLogs: progressLogs
+      .filter((entry) => entry && typeof entry.message === 'string')
+      .map((entry) => ({
+        ts: entry.ts || now,
+        message: String(entry.message).trim(),
+      }))
+      .filter((entry) => entry.message)
+      .slice(-MAX_PROGRESS_LOGS),
     createdAt: input.createdAt || existing?.createdAt || now,
     updatedAt: now,
     finishedAt: input.finishedAt ?? existing?.finishedAt,
