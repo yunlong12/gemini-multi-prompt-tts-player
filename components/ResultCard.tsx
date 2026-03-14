@@ -11,9 +11,9 @@ interface ResultCardProps {
 export const ResultCard: React.FC<ResultCardProps> = ({ item, isActive }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [isCollapsible, setIsCollapsible] = useState(false);
-  const clampedMeasureRef = useRef<HTMLDivElement | null>(null);
-  const fullMeasureRef = useRef<HTMLDivElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
   const partLabel = formatPartLabel(item.partIndex, item.partCount);
+  const collapsedMaxHeight = 240;
 
   useEffect(() => {
     setIsExpanded(false);
@@ -26,9 +26,13 @@ export const ResultCard: React.FC<ResultCardProps> = ({ item, isActive }) => {
     }
 
     const measure = () => {
-      const clampedHeight = clampedMeasureRef.current?.getBoundingClientRect().height ?? 0;
-      const fullHeight = fullMeasureRef.current?.getBoundingClientRect().height ?? 0;
-      setIsCollapsible(fullHeight - clampedHeight > 4);
+      const contentElement = contentRef.current;
+      if (!contentElement) {
+        setIsCollapsible(false);
+        return;
+      }
+
+      setIsCollapsible(contentElement.scrollHeight - collapsedMaxHeight > 4);
     };
 
     const frameId = window.requestAnimationFrame(measure);
@@ -62,8 +66,8 @@ export const ResultCard: React.FC<ResultCardProps> = ({ item, isActive }) => {
   return (
     <div className={`
       relative rounded-lg p-5 border transition-all duration-300
-      ${isActive 
-        ? 'bg-slate-800 border-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.2)] scale-[1.01]' 
+      ${isActive
+        ? 'bg-slate-800 border-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.2)] scale-[1.01]'
         : 'bg-slate-800/50 border-slate-700'
       }
     `}>
@@ -86,7 +90,11 @@ export const ResultCard: React.FC<ResultCardProps> = ({ item, isActive }) => {
       {item.answer && (
         <div className="mb-4">
           <div className="relative p-3 bg-slate-900/50 rounded-md border border-slate-800/80 overflow-hidden">
-            <div className={`text-slate-300 text-sm leading-relaxed whitespace-pre-wrap break-words ${isExpanded ? '' : 'line-clamp-10'}`}>
+            <div
+              ref={contentRef}
+              className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap break-words transition-[max-height] duration-200 ease-out"
+              style={isExpanded ? undefined : { maxHeight: `${collapsedMaxHeight}px`, overflow: 'hidden' }}
+            >
               {item.answer}
             </div>
             {!isExpanded && isCollapsible && (
@@ -104,20 +112,6 @@ export const ResultCard: React.FC<ResultCardProps> = ({ item, isActive }) => {
               </button>
             </div>
           )}
-          <div className="absolute inset-x-0 top-0 h-0 -z-10 pointer-events-none opacity-0 overflow-hidden" aria-hidden="true">
-            <div
-              ref={clampedMeasureRef}
-              className="text-sm leading-relaxed whitespace-pre-wrap break-words line-clamp-10 p-3"
-            >
-              {item.answer}
-            </div>
-            <div
-              ref={fullMeasureRef}
-              className="text-sm leading-relaxed whitespace-pre-wrap break-words p-3"
-            >
-              {item.answer}
-            </div>
-          </div>
         </div>
       )}
 

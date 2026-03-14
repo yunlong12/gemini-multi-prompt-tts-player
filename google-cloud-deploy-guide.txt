@@ -101,6 +101,10 @@ Use these rules after the inspection pass:
 - Official user-facing app URL: `https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app`
 - Current runtime service account: `323507996614-compute@developer.gserviceaccount.com`
 - Service-generated Cloud Run alias: `https://gemini-multi-prompt-tts-player-ytzgvkfttq-uc.a.run.app`
+- Current Cloud Run memory: `1Gi`
+- Current Cloud Run min instances: `1`
+- Current Cloud Run max instances: `10`
+- Current TTS chunk concurrency: `2`
 - Deprecated old-project URL: `https://gemini-multi-prompt-tts-player-7kce3noezq-uc.a.run.app`
 - Deprecated old-project canonical URL: `https://gemini-multi-prompt-tts-player-305416593596.us-central1.run.app`
 - Current health endpoint: `GET /api/health`
@@ -139,6 +143,8 @@ Current project note:
   be mapped into runtime env var `GEMINI_API_KEY`.
 - If you want primary/backup Gemini failover, provide `GEMINI_API_KEYS` as a
   comma-separated env var or inject an equivalent value from Secret Manager.
+- Current production setup maps both `GEMINI_API_KEY` and `GEMINI_API_KEYS` to
+  `gemini-key:latest`.
 - The other three values can be provided either via Secret Manager or direct
   Cloud Run env vars if you are minimizing project changes.
 
@@ -216,18 +222,21 @@ gcloud run deploy gemini-multi-prompt-tts-player ^
   --region us-central1 ^
   --allow-unauthenticated ^
   --service-account 323507996614-compute@developer.gserviceaccount.com ^
-  --set-secrets GEMINI_API_KEY=gemini-key:latest ^
+  --set-secrets GEMINI_API_KEY=gemini-key:latest,GEMINI_API_KEYS=gemini-key:latest ^
   --env-vars-file C:\path\to\cloudrun-env.yaml ^
   --min-instances 1 ^
   --max-instances 10 ^
   --concurrency 80 ^
   --timeout 300 ^
-  --port 8080
+  --port 8080 ^
+  --memory 1Gi
 
 Notes:
 
 - Do not set `PORT` in `--set-env-vars`
 - `min-instances=1` reduces cold starts
+- `memory=1Gi` is the current production value; it was raised after long manual
+  runs exceeded the earlier `512Mi` limit during audio merge/upload
 - `max-instances=10` is the current scale setting used to handle concurrent scheduled work
 - Do not include `PORT` in `--set-env-vars`; Cloud Run reserves it
 

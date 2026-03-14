@@ -65,6 +65,26 @@ Deployment result:
 - Artifact bucket: gs://gemini-tts-daily-briefings-western-creek-489616-m3
 - Runtime service account: 323507996614-compute@developer.gserviceaccount.com
 
+Follow-up updates applied later on 2026-03-13:
+1. Enable multi-key Gemini failover at runtime
+   - Cloud Run env mapping updated so both `GEMINI_API_KEY` and `GEMINI_API_KEYS`
+     point to `gemini-key:latest`
+2. Reduce TTS chunk concurrency after stability review
+   - `gcloud run services update gemini-multi-prompt-tts-player --region us-central1 --project western-creek-489616-m3 --update-env-vars TTS_CHUNK_CONCURRENCY=2`
+3. Increase Cloud Run memory to avoid OOM during long audio merge/upload
+   - `gcloud run services update gemini-multi-prompt-tts-player --project western-creek-489616-m3 --region us-central1 --memory 1Gi`
+4. Redeploy current app source while preserving existing service identity
+   - `gcloud run deploy gemini-multi-prompt-tts-player --source . --project western-creek-489616-m3 --region us-central1 --allow-unauthenticated --service-account 323507996614-compute@developer.gserviceaccount.com --set-secrets "GEMINI_API_KEY=gemini-key:latest,GEMINI_API_KEYS=gemini-key:latest" --set-env-vars "APP_ADMIN_PASSWORD=[REDACTED],ADMIN_SESSION_SECRET=[REDACTED],SCHEDULER_SHARED_SECRET=[REDACTED],GCS_BUCKET_NAME=gemini-tts-daily-briefings-western-creek-489616-m3,APP_DEFAULT_TIMEZONE=Europe/Paris,FIRESTORE_COLLECTION_SCHEDULES=schedules,FIRESTORE_COLLECTION_RUNS=schedule_runs,FIRESTORE_COLLECTION_MANUAL_RUNS=manual_runs,FIRESTORE_COLLECTION_RATE_LIMITS=rate_limits,CLOUD_SCHEDULER_LOCATION=us-central1,CLOUD_SCHEDULER_JOB_NAME=schedule-runner,ALLOWED_ORIGINS=https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app,TTS_CHUNK_CONCURRENCY=2" --min-instances 1 --max-instances 10 --concurrency 80 --timeout 300 --port 8080 --memory 1Gi --quiet`
+
+Current verified production snapshot after follow-up updates:
+- Ready revision: gemini-multi-prompt-tts-player-00007-8x2
+- Memory: 1Gi
+- Min instances: 1
+- TTS chunk concurrency: 2
+- `GEMINI_API_KEY` secret mapping: gemini-key:latest
+- `GEMINI_API_KEYS` secret mapping: gemini-key:latest
+- Health check: `GET /api/health` -> `{"ok":true}`
+
 Standard pre-deploy inspection template:
 1. Confirm active account and target project.
    - `gcloud config list --format=json`

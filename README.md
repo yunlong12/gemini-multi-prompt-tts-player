@@ -75,10 +75,10 @@ Steps:
 What happens next:
 
 1. Each prompt is queued.
-2. The app requests grounded text from `/api/text`.
-3. The app requests speech audio from `/api/tts`.
-4. The returned audio is decoded in the browser.
-5. The result becomes available in Results, History, and Player.
+2. The app creates a server-side manual run through `/api/manual-runs`.
+3. The backend generates grounded text, splits long text into TTS parts, and produces audio in the background.
+4. The frontend polls manual-run status and restores progress after refresh.
+5. When the run succeeds, the app loads the stored audio and makes it available in Results, History, and Player.
 
 If multiple prompts are entered, they are processed one by one.
 
@@ -285,6 +285,13 @@ Current production architecture:
 - Google Cloud Storage for scheduled WAV and JSON artifacts
 - Cloud Scheduler for polling due schedules
 
+Current production runtime profile:
+
+- Cloud Run service: `gemini-multi-prompt-tts-player`
+- Memory: `1Gi`
+- Minimum instances: `1`
+- TTS chunk concurrency: `2`
+
 Important runtime variables:
 
 - `GEMINI_API_KEY`
@@ -302,6 +309,11 @@ Important runtime variables:
 server will use it first and fail over to the next key on retryable Gemini
 quota/overload errors. If it is unset, the server falls back to
 `GEMINI_API_KEY`.
+
+Current production mapping:
+
+- `GEMINI_API_KEY -> gemini-key:latest`
+- `GEMINI_API_KEYS -> gemini-key:latest`
 
 ### Security Notes
 
