@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Schedule, ScheduleFrequency } from '../types';
 
 interface ScheduleFormProps {
@@ -25,14 +25,52 @@ const defaultDraft: Partial<Schedule> = {
   outputPrefix: 'daily-briefings',
 };
 
+const formatDraftNextRunPreview = (draft: Partial<Schedule>, fallback?: string) => {
+  const timezone = draft.timezone || 'Europe/Paris';
+  const frequency = (draft.frequency || 'daily') as ScheduleFrequency;
+
+  if (frequency === 'custom_interval') {
+    const intervalMinutes = Math.max(1, Number(draft.intervalMinutes || 60));
+    return `About every ${intervalMinutes} minute${intervalMinutes === 1 ? '' : 's'} in ${timezone} after the scheduler picks up the next cycle.`;
+  }
+
+  if (frequency === 'weekly') {
+    const activeDays = Array.isArray(draft.daysOfWeek) ? draft.daysOfWeek : [];
+    const activeLabels = activeDays.length > 0 ? activeDays.map((day) => dayLabels[day]).join(', ') : 'no weekdays selected yet';
+    return `Runs at ${draft.timeOfDay || '08:00'} in ${timezone} on ${activeLabels}. Save to recalculate the exact next run timestamp.`;
+  }
+
+  if (fallback) {
+    const parsed = new Date(fallback);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.toLocaleString(undefined, { timeZone: timezone });
+    }
+  }
+
+  return `Runs daily at ${draft.timeOfDay || '08:00'} in ${timezone}. Save to recalculate the exact next run timestamp.`;
+};
+
 export const ScheduleForm: React.FC<ScheduleFormProps> = ({ initialValue, onSubmit, onCancel, isSaving }) => {
   const [draft, setDraft] = useState<Partial<Schedule>>(defaultDraft);
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     setDraft(initialValue ? { ...initialValue } : defaultDraft);
   }, [initialValue]);
 
+  useEffect(() => {
+    if (!initialValue) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      nameInputRef.current?.focus();
+      nameInputRef.current?.select();
+    });
+  }, [initialValue]);
+
   const frequency = (draft.frequency || 'daily') as ScheduleFrequency;
+  const nextRunPreview = useMemo(() => formatDraftNextRunPreview(draft, initialValue?.nextRunAt), [draft, initialValue?.nextRunAt]);
 
   const toggleDay = (day: number) => {
     const existing = new Set(draft.daysOfWeek || []);
@@ -50,11 +88,67 @@ export const ScheduleForm: React.FC<ScheduleFormProps> = ({ initialValue, onSubm
   };
 
   return (
-    <form onSubmit={handleSubmit} className="bg-slate-900 rounded-lg border border-slate-800 p-5 space-y-4">
+    <form
+      aria-label={initialValue ? `Edit schedule ${initialValue.name}` : 'Create schedule'}
+      onSubmit={handleSubmit}
+      className={`rounded-[1.4rem] border p-5 shadow-[0_18px_50px_-28px_rgba(15,23,42,0.9)] space-y-4 ${
+        initialValue
+          ? 'border-cyan-500/40 bg-[radial-gradient(circle_at_top_left,_rgba(34,211,238,0.14),_transparent_32%),linear-gradient(180deg,rgba(15,23,42,0.96),rgba(2,6,23,0.98))]'
+          : 'border-slate-800 bg-slate-900'
+      }`}
+    >
+      <div className="space-y-3">
+        <div className="flex flex-col gap-3 rounded-[1.15rem] border border-slate-800 bg-slate-950/45 p-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <div className={`inline-flex rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] ${
+                initialValue
+                  ? 'border-cyan-400/30 bg-cyan-500/10 text-cyan-100'
+                  : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100'
+              }`}>
+                {initialValue ? 'Editing Schedule' : 'Create New Schedule'}
+              </div>
+              <h3 className="mt-3 text-lg font-semibold tracking-tight text-white">
+                {initialValue ? initialValue.name : 'Build a new automated briefing'}
+              </h3>
+              <p className="mt-1 text-sm leading-6 text-slate-400">
+                {initialValue
+                  ? 'Adjust the schedule here. The next run timestamp is recalculated when you save.'
+                  : 'Define the prompt, cadence, and output settings for a new automated run.'}
+              </p>
+            </div>
+            {initialValue && (
+              <button
+                type="button"
+                onClick={onCancel}
+                className="inline-flex items-center justify-center rounded-2xl border border-slate-700 bg-slate-900/70 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
+              >
+                Exit Edit
+              </button>
+            )}
+          </div>
+          <div className="grid gap-3 md:grid-cols-3">
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/70 px-3 py-3">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500">Mode</div>
+              <div className="mt-1 text-sm font-medium text-slate-100">{initialValue ? 'Update existing schedule' : 'Create draft'}</div>
+            </div>
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/70 px-3 py-3">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500">Frequency</div>
+              <div className="mt-1 text-sm font-medium text-slate-100">{frequency.replace('_', ' ')}</div>
+            </div>
+            <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/5 px-3 py-3">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-200/70">Next Run Preview</div>
+              <div className="mt-1 text-sm font-medium leading-6 text-cyan-50">{nextRunPreview}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div className="grid gap-4 md:grid-cols-2">
         <label className="block text-sm text-slate-300">
           <span className="mb-1 block">Name</span>
           <input
+            ref={nameInputRef}
             value={draft.name || ''}
             onChange={(e) => setDraft((prev) => ({ ...prev, name: e.target.value }))}
             className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 outline-none focus:ring-2 focus:ring-blue-500"
@@ -219,7 +313,7 @@ export const ScheduleForm: React.FC<ScheduleFormProps> = ({ initialValue, onSubm
           onClick={onCancel}
           className="px-4 py-2 rounded-lg font-semibold bg-slate-800 text-slate-300 border border-slate-700 hover:bg-slate-700"
         >
-          Cancel
+          {initialValue ? 'Cancel Edit' : 'Cancel'}
         </button>
       </div>
     </form>

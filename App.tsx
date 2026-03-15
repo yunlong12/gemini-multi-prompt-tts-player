@@ -22,7 +22,7 @@ import {
   updateSchedulerConfig as updateSchedulerConfigApi,
 } from './services/adminApi';
 import { createManualRuns as createManualRunsApi, deleteManualRun as deleteManualRunApi, fetchManualRuns } from './services/manualRunApi';
-import { AuthSession, GeminiToolOptions, ItemStatus, ManualRun, ProcessItem, Schedule, SchedulerConfig, ScheduleRun } from './types';
+import { AudioPart, AuthSession, GeminiToolOptions, ItemStatus, ManualRun, PlayerUiState, ProcessItem, Schedule, SchedulerConfig, ScheduleRun } from './types';
 import { arrayBufferToBase64, base64ToUint8Array, decodeAudioData } from './utils/audioUtils';
 import { clearPersistedState, loadPersistedState, PersistedScheduledRun, PersistedState, savePersistedState } from './utils/storage';
 import { formatPartLabel } from './utils/ttsChunks';
@@ -36,7 +36,26 @@ const DEFAULT_TOOL_OPTIONS: Required<GeminiToolOptions> = {
 const POLLING_PRESETS = [1, 5, 10, 15, 30, 60];
 type RateLimitScope = 'login' | 'text' | 'tts';
 type ScheduledAudioLoadState = 'idle' | 'queued' | 'downloading' | 'decoding' | 'cached' | 'error';
+type RunDeleteIntent = {
+  mode: 'single' | 'bulk';
+  runIds: string[];
+};
+type ScheduleActionType = 'edit' | 'run-now' | 'toggle-enabled' | 'delete';
 const MANUAL_RUN_POLL_INTERVAL_MS = 5000;
+const initialPlayerUiState = (): PlayerUiState => ({
+  checkedPlayerItemIds: {},
+  selectedPlayerItemId: null,
+  expandedAudioPartKeys: {},
+  currentlyPlayingPlayerItemId: null,
+  currentlyPlayingPartIndex: null,
+  playerProgress: 0,
+  playerDuration: 0,
+  isPlayerPlaying: false,
+  isPlayingSequence: false,
+  queue: [],
+  queueIndex: 0,
+  pauseOffset: 0,
+});
 
 const cronToMinutes = (cron: string): number | null => {
   const normalized = String(cron || '').trim();
@@ -88,6 +107,18 @@ const manualRunStatusToItemStatus = (status: ManualRun['status']): ItemStatus =>
   }
 };
 
+const mergeAudioParts = (incoming: AudioPart[] | undefined, existing: AudioPart[] | undefined): AudioPart[] => {
+  const nextParts = Array.isArray(incoming) ? incoming : [];
+  const existingByIndex = new Map((existing || []).map((part) => [part.partIndex, part]));
+  return nextParts
+    .map((part) => ({
+      ...existingByIndex.get(part.partIndex),
+      ...part,
+      audioBase64: part.audioBase64 ?? existingByIndex.get(part.partIndex)?.audioBase64,
+    }))
+    .sort((a, b) => a.partIndex - b.partIndex);
+};
+
 const manualRunToProcessItem = (run: ManualRun, existing?: ProcessItem): ProcessItem => ({
   id: run.id,
   prompt: run.prompt,
@@ -97,6 +128,7 @@ const manualRunToProcessItem = (run: ManualRun, existing?: ProcessItem): Process
   audioPath: run.audioPath || existing?.audioPath,
   audioDownloadUrl: run.audioDownloadUrl || existing?.audioDownloadUrl,
   textPath: run.textPath || existing?.textPath,
+  audioParts: mergeAudioParts(run.audioParts, existing?.audioParts),
   ttsModel: run.ttsModel,
   enableGoogleSearch: run.toolOptions?.enableGoogleSearch ?? existing?.enableGoogleSearch ?? DEFAULT_TOOL_OPTIONS.enableGoogleSearch,
   enableUrlContext: run.toolOptions?.enableUrlContext ?? existing?.enableUrlContext ?? DEFAULT_TOOL_OPTIONS.enableUrlContext,
@@ -115,6 +147,7 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'results' | 'player' | 'history' | 'schedules' | 'runs'>('results');
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [playerAutoplayRequestId, setPlayerAutoplayRequestId] = useState<string | null>(null);
+  const [playerUiState, setPlayerUiState] = useState<PlayerUiState>(() => initialPlayerUiState());
   const [isHydrating, setIsHydrating] = useState(true);
   const [isProcessingActive, setIsProcessingActive] = useState(false);
   const [authSession, setAuthSession] = useState<AuthSession | null>(null);
@@ -131,7 +164,13 @@ const App: React.FC = () => {
   const [schedulerTimezoneDraft, setSchedulerTimezoneDraft] = useState('Europe/Paris');
   const [isSchedulerSaving, setIsSchedulerSaving] = useState(false);
   const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null);
+  const [pendingScheduleActionId, setPendingScheduleActionId] = useState<string | null>(null);
+  const [pendingScheduleActionType, setPendingScheduleActionType] = useState<ScheduleActionType | null>(null);
   const [selectedHistoryEntryIds, setSelectedHistoryEntryIds] = useState<Set<string>>(new Set());
+  const [selectedRunIds, setSelectedRunIds] = useState<Set<string>>(new Set());
+  const [pendingRunDeleteIds, setPendingRunDeleteIds] = useState<string[]>([]);
+  const [isDeletingRuns, setIsDeletingRuns] = useState(false);
+  const [runDeleteIntent, setRunDeleteIntent] = useState<RunDeleteIntent | null>(null);
   const [scheduledAudioBuffersById, setScheduledAudioBuffersById] = useState<Record<string, AudioBuffer>>({});
   const [scheduledAudioLoadStateById, setScheduledAudioLoadStateById] = useState<Record<string, ScheduledAudioLoadState>>({});
   const [scheduledAudioErrorsById, setScheduledAudioErrorsById] = useState<Record<string, string>>({});
@@ -150,6 +189,7 @@ const App: React.FC = () => {
   const manualAudioLoadPromisesRef = useRef<Record<string, Promise<AudioBuffer | null>>>({});
   const manualRunProgressCursorRef = useRef<Record<string, number>>({});
   const hasInitializedManualRunProgressRef = useRef(false);
+  const scheduleFormShellRef = useRef<HTMLDivElement | null>(null);
 
   const addLog = (msg: string) => setLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
   const promptSnippet = (value: string, max = 72) => {
@@ -193,6 +233,14 @@ const App: React.FC = () => {
       });
       return next;
     });
+  const updateRunSelection = (runId: string, checked: boolean) =>
+    setSelectedRunIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(runId);
+      else next.delete(runId);
+      return next;
+    });
+  const clearRunSelection = () => setSelectedRunIds(new Set());
 
   const clearAdminSession = () => {
     addLog('[Auth] Clearing admin session and cached admin data.');
@@ -203,6 +251,13 @@ const App: React.FC = () => {
     setSchedulerIntervalMinutesDraft(5);
     setSchedulerTimezoneDraft('Europe/Paris');
     setEditingSchedule(null);
+    setPendingScheduleActionId(null);
+    setPendingScheduleActionType(null);
+    setSelectedRunIds(new Set());
+    setPendingRunDeleteIds([]);
+    setIsDeletingRuns(false);
+    setRunDeleteIntent(null);
+    setPlayerUiState(initialPlayerUiState());
   };
   const clearScheduledAudioState = (runId: string) => {
     const playerItemId = `scheduled:${runId}`;
@@ -226,6 +281,25 @@ const App: React.FC = () => {
     });
     delete scheduledAudioLoadPromisesRef.current[playerItemId];
     delete scheduledPrefetchedIdsRef.current[playerItemId];
+  };
+  const clearDeletedScheduledRunPlayerState = (runId: string) => {
+    const scheduledPlayerId = `scheduled:${runId}`;
+    setPlayerAutoplayRequestId((prev) => (prev === scheduledPlayerId ? null : prev));
+    setPlayerUiState((prev) => {
+      const queueTouchesRun = prev.queue.some((segment) => segment.playerItemId === scheduledPlayerId);
+      const selectedTouchesRun =
+        prev.selectedPlayerItemId === scheduledPlayerId ||
+        prev.currentlyPlayingPlayerItemId === scheduledPlayerId;
+      if (!queueTouchesRun && !selectedTouchesRun) {
+        return prev;
+      }
+      return initialPlayerUiState();
+    });
+  };
+  const getScheduledRunRecord = (runId: string) => runs.find((run) => run.id === runId) || persistedScheduledRuns[runId] || null;
+  const getScheduledRunTitle = (runId: string) => {
+    const target = getScheduledRunRecord(runId);
+    return target?.resolvedPrompt || target?.generatedText || runId;
   };
 
   const refreshAdminData = async () => {
@@ -293,6 +367,8 @@ const App: React.FC = () => {
     if (!isAdminAuthenticated) {
       setItems([]);
       itemsRef.current = [];
+      setPlayerUiState(initialPlayerUiState());
+      setSelectedItemId(null);
       manualRunProgressCursorRef.current = {};
       hasInitializedManualRunProgressRef.current = false;
       return;
@@ -322,6 +398,12 @@ const App: React.FC = () => {
                 logPersist(`[Hydrate] Failed to decode cached manual audio for ${itemIdLabel(item.id)}.`);
               }
             }
+            const audioParts = Array.isArray(item.audioParts)
+              ? item.audioParts.map((part) => ({
+                  ...part,
+                  audioBase64: part.audioBase64,
+                }))
+              : undefined;
             let status = item.status as ItemStatus;
             if (status === ItemStatus.PLAYING) status = ItemStatus.READY;
             if (audioBuffer && status !== ItemStatus.ERROR) status = ItemStatus.READY;
@@ -335,6 +417,7 @@ const App: React.FC = () => {
               audioPath: item.audioPath,
               audioDownloadUrl: item.audioDownloadUrl,
               textPath: item.textPath,
+              audioParts,
               ttsModel: item.ttsModel,
               enableGoogleSearch: item.enableGoogleSearch ?? DEFAULT_TOOL_OPTIONS.enableGoogleSearch,
               enableUrlContext: item.enableUrlContext ?? DEFAULT_TOOL_OPTIONS.enableUrlContext,
@@ -354,6 +437,13 @@ const App: React.FC = () => {
           setPersistedScheduledRuns(
             Object.fromEntries((persisted.scheduledRuns || []).map((run) => [run.id, run]))
           );
+          if (persisted.playerUiState) {
+            setPlayerUiState({
+              ...initialPlayerUiState(),
+              ...persisted.playerUiState,
+              isPlayerPlaying: false,
+            });
+          }
           addLog('Loaded saved session from IndexedDB.');
           logPersist(`[Hydrate] Restore complete. Manual items=${hydratedItems.length}, scheduled runs=${persisted.scheduledRuns?.length || 0}.`);
         }
@@ -379,6 +469,15 @@ const App: React.FC = () => {
           audioPath: item.audioPath,
           audioDownloadUrl: item.audioDownloadUrl,
           textPath: item.textPath,
+          audioParts: item.audioParts?.map((part) => ({
+            partIndex: part.partIndex,
+            partCount: part.partCount,
+            text: part.text,
+            audioPath: part.audioPath,
+            audioDownloadUrl: part.audioDownloadUrl,
+            durationSeconds: part.durationSeconds,
+            audioBase64: part.audioBase64,
+          })),
           ttsModel: item.ttsModel,
           enableGoogleSearch: item.enableGoogleSearch,
           enableUrlContext: item.enableUrlContext,
@@ -390,6 +489,10 @@ const App: React.FC = () => {
           timestamp: item.timestamp,
         })),
         scheduledRuns: Object.values(persistedScheduledRuns),
+        playerUiState: {
+          ...playerUiState,
+          isPlayerPlaying: false,
+        },
         recentPrompts: [],
         updatedAt: Date.now(),
       };
@@ -402,7 +505,7 @@ const App: React.FC = () => {
       }
     }, 1000);
     return () => clearTimeout(timeout);
-  }, [items, isHydrating, persistedScheduledRuns]);
+  }, [items, isHydrating, persistedScheduledRuns, playerUiState]);
 
   const getAudioContext = () => {
     if (!audioContextRef.current) {
@@ -466,6 +569,9 @@ const App: React.FC = () => {
   };
   const loadManualRunAudio = async (itemId: string): Promise<AudioBuffer | null> => {
     const item = itemsRef.current.find((entry) => entry.id === itemId);
+    if (item?.audioParts?.length) {
+      return null;
+    }
     if (!item?.audioPath) {
       return null;
     }
@@ -530,6 +636,9 @@ const App: React.FC = () => {
   const loadScheduledRunAudio = async (runId: string): Promise<AudioBuffer | null> => {
     const playerItemId = `scheduled:${runId}`;
     const matchingRun = runs.find((run) => run.id === runId) || persistedScheduledRuns[runId];
+    if (matchingRun?.audioParts?.length) {
+      return null;
+    }
     const audioPath = 'audioPath' in (matchingRun || {}) ? matchingRun?.audioPath : undefined;
     if (!audioPath) {
       logCache(`[Scheduled] No audioPath available for run ${runId.slice(0, 8)}.`);
@@ -669,7 +778,7 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    const scheduledRunsWithAudio = runs.filter((run) => run.status === 'success' && Boolean(run.audioPath));
+    const scheduledRunsWithAudio = runs.filter((run) => run.status === 'success' && Boolean(run.audioPath) && !(run.audioParts?.length));
     if (!scheduledRunsWithAudio.length) {
       return;
     }
@@ -721,7 +830,9 @@ const App: React.FC = () => {
     setIsProcessingActive(pending);
   }, [items]);
   useEffect(() => {
-    const pendingManualAudio = items.filter((item) => item.status === ItemStatus.READY && item.audioPath && !item.audioBuffer);
+    const pendingManualAudio = items.filter(
+      (item) => item.status === ItemStatus.READY && item.audioPath && !item.audioBuffer && !(item.audioParts?.length)
+    );
     if (!pendingManualAudio.length) {
       return;
     }
@@ -758,6 +869,7 @@ const App: React.FC = () => {
               enableUrlContext: item.enableUrlContext,
             },
             audioPath: item.audioPath,
+            audioParts: item.audioParts,
             audioDownloadUrl: item.audioDownloadUrl,
             textPath: item.textPath,
             errorMessage: item.error,
@@ -841,6 +953,8 @@ const App: React.FC = () => {
       return;
     }
     addLog(`[Schedules] Deleting schedule "${schedule.name}" (${schedule.id}).`);
+    setPendingScheduleActionId(schedule.id);
+    setPendingScheduleActionType('delete');
     try {
       await deleteScheduleApi(schedule.id);
       if (editingSchedule?.id === schedule.id) setEditingSchedule(null);
@@ -850,6 +964,34 @@ const App: React.FC = () => {
       addLog(`[Schedules] Delete failed for "${schedule.name}": ${error?.message || error}`);
       if (isUnauthorizedError(error)) clearAdminSession();
       setAdminError(error?.message || 'Failed to delete schedule');
+    } finally {
+      setPendingScheduleActionId(null);
+      setPendingScheduleActionType(null);
+    }
+  };
+  const handleScheduleEnabledToggle = async (schedule: Schedule) => {
+    if (!isAdminAuthenticated) {
+      addLog('[Schedules] Enable toggle skipped: missing admin session.');
+      return;
+    }
+    setPendingScheduleActionId(schedule.id);
+    setPendingScheduleActionType('toggle-enabled');
+    setAdminError('');
+    addLog(`[Schedules] Toggling "${schedule.name}" to ${schedule.enabled ? 'disabled' : 'enabled'}.`);
+    try {
+      await updateScheduleApi(schedule.id, { enabled: !schedule.enabled });
+      if (editingSchedule?.id === schedule.id) {
+        setEditingSchedule((prev) => (prev ? { ...prev, enabled: !schedule.enabled } : prev));
+      }
+      await refreshAdminData();
+      addLog(`[Schedules] "${schedule.name}" is now ${schedule.enabled ? 'disabled' : 'enabled'}.`);
+    } catch (error: any) {
+      addLog(`[Schedules] Enable toggle failed for "${schedule.name}": ${error?.message || error}`);
+      if (isUnauthorizedError(error)) clearAdminSession();
+      setAdminError(error?.message || 'Failed to update schedule enabled state');
+    } finally {
+      setPendingScheduleActionId(null);
+      setPendingScheduleActionType(null);
     }
   };
   const handleScheduleRunNow = async (schedule: Schedule) => {
@@ -857,6 +999,8 @@ const App: React.FC = () => {
       addLog('[Schedules] Run-now skipped: missing admin session.');
       return;
     }
+    setPendingScheduleActionId(schedule.id);
+    setPendingScheduleActionType('run-now');
     addLog(`[Schedules] Manual run triggered for "${schedule.name}" (${schedule.id}).`);
     try {
       const run = await runScheduleNow(schedule.id);
@@ -867,6 +1011,9 @@ const App: React.FC = () => {
       addLog(`[Schedules] Manual run failed for "${schedule.name}": ${error?.message || error}`);
       if (isUnauthorizedError(error)) clearAdminSession();
       setAdminError(error?.message || 'Failed to run schedule');
+    } finally {
+      setPendingScheduleActionId(null);
+      setPendingScheduleActionType(null);
     }
   };
   const handleSchedulerConfigSave = async () => {
@@ -895,8 +1042,9 @@ const App: React.FC = () => {
       setIsSchedulerSaving(false);
     }
   };
-  const deleteScheduledHistoryItem = async (runId: string) => {
-    const target = persistedScheduledRuns[runId];
+  const deleteScheduledRunRecord = async (runId: string) => {
+    const target = getScheduledRunRecord(runId);
+    const targetTitle = getScheduledRunTitle(runId);
     if (!target) {
       return false;
     }
@@ -909,13 +1057,11 @@ const App: React.FC = () => {
       return false;
     }
 
-    addLog(`[History] Deleting scheduled run "${target.resolvedPrompt}" (${runId}) from cloud and local cache.`);
+    addLog(`[History] Deleting scheduled run "${targetTitle}" (${runId}) from cloud and local cache.`);
     setAdminError('');
     try {
       await deleteRunApi(runId);
-      if (playerAutoplayRequestId === `scheduled:${runId}`) {
-        setPlayerAutoplayRequestId(null);
-      }
+      clearDeletedScheduledRunPlayerState(runId);
       clearScheduledAudioState(runId);
       setPersistedScheduledRuns((prev) => {
         const next = { ...prev };
@@ -923,10 +1069,16 @@ const App: React.FC = () => {
         return next;
       });
       setRuns((prev) => prev.filter((run) => run.id !== runId));
-      addLog(`[History] Deleted scheduled run "${target.resolvedPrompt}" from cloud and local cache.`);
+      setSelectedRunIds((prev) => {
+        if (!prev.has(runId)) return prev;
+        const next = new Set(prev);
+        next.delete(runId);
+        return next;
+      });
+      addLog(`[History] Deleted scheduled run "${targetTitle}" from cloud and local cache.`);
       return true;
     } catch (error: any) {
-      addLog(`[History] Failed to delete scheduled run "${target.resolvedPrompt}": ${error?.message || error}`);
+      addLog(`[History] Failed to delete scheduled run "${targetTitle}": ${error?.message || error}`);
       if (isUnauthorizedError(error)) {
         clearAdminSession();
       }
@@ -935,12 +1087,12 @@ const App: React.FC = () => {
     }
   };
   const handleScheduledHistoryDelete = async (runId: string) => {
-    const target = persistedScheduledRuns[runId];
-    if (!target || !window.confirm(`Delete scheduled history "${target.resolvedPrompt.substring(0, 30)}..." from cloud and local cache?`)) {
+    const targetTitle = getScheduledRunTitle(runId);
+    if (!targetTitle || !window.confirm(`Delete scheduled history "${targetTitle.substring(0, 30)}..." from cloud and local cache?`)) {
       return;
     }
 
-    await deleteScheduledHistoryItem(runId);
+    await deleteScheduledRunRecord(runId);
   };
   const deleteManualHistoryItem = async (itemId: string) => {
     const target = itemsRef.current.find((entry) => entry.id === itemId);
@@ -982,6 +1134,10 @@ const App: React.FC = () => {
     setSelectedItemId(null);
     setPlayerAutoplayRequestId(null);
     setSelectedHistoryEntryIds(new Set());
+    setSelectedRunIds(new Set());
+    setPendingRunDeleteIds([]);
+    setIsDeletingRuns(false);
+    setRunDeleteIntent(null);
     setScheduledAudioBuffersById({});
     setScheduledAudioLoadStateById({});
     setScheduledAudioErrorsById({});
@@ -990,23 +1146,99 @@ const App: React.FC = () => {
     scheduledPrefetchRunningRef.current = false;
     void clearPersistedState();
   };
+  const requestRunDelete = (runId: string) => {
+    setRunDeleteIntent({ mode: 'single', runIds: [runId] });
+  };
+  const requestBulkRunDelete = () => {
+    const runIds = runs.filter((run) => selectedRunIds.has(run.id)).map((run) => run.id);
+    if (!runIds.length) {
+      return;
+    }
+    setRunDeleteIntent({ mode: 'bulk', runIds });
+  };
+  const cancelRunDelete = () => {
+    if (isDeletingRuns) {
+      return;
+    }
+    setRunDeleteIntent(null);
+  };
+  const handleConfirmRunDelete = async () => {
+    if (!runDeleteIntent?.runIds.length) {
+      return;
+    }
+
+    setIsDeletingRuns(true);
+    setPendingRunDeleteIds(runDeleteIntent.runIds);
+    setAdminError('');
+    let failureCount = 0;
+
+    for (const runId of runDeleteIntent.runIds) {
+      const deleted = await deleteScheduledRunRecord(runId);
+      if (!deleted) {
+        failureCount += 1;
+      }
+    }
+
+    setSelectedRunIds((prev) => {
+      const next = new Set(prev);
+      runDeleteIntent.runIds.forEach((runId) => next.delete(runId));
+      return next;
+    });
+    setRunDeleteIntent(failureCount ? { ...runDeleteIntent, runIds: runDeleteIntent.runIds.filter((runId) => getScheduledRunRecord(runId)) } : null);
+    setPendingRunDeleteIds([]);
+    setIsDeletingRuns(false);
+    addLog(`[Runs] Delete request finished. Requested=${runDeleteIntent.runIds.length}, Failed=${failureCount}.`);
+  };
+  useEffect(() => {
+    const validRunIds = new Set(runs.map((run) => run.id));
+    setSelectedRunIds((prev) => {
+      const next = new Set(Array.from(prev).filter((runId) => validRunIds.has(runId)));
+      return next.size === prev.size ? prev : next;
+    });
+    setRunDeleteIntent((prev) => {
+      if (!prev) return prev;
+      const nextRunIds = prev.runIds.filter((runId) => validRunIds.has(runId));
+      if (!nextRunIds.length) return null;
+      if (nextRunIds.length === prev.runIds.length) return prev;
+      return { ...prev, runIds: nextRunIds };
+    });
+  }, [runs]);
   const resultsItems = items
     .filter((item) => Date.now() - item.timestamp < ONE_HOUR_MS)
     .sort((a, b) => b.timestamp - a.timestamp || (a.partIndex || 1) - (b.partIndex || 1));
-  const persistedScheduledHistory = Object.values(persistedScheduledRuns);
+  const orderedRuns = [...runs].sort(
+    (a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime() || (a.partIndex || 1) - (b.partIndex || 1)
+  );
+  const selectedRuns = orderedRuns.filter((run) => selectedRunIds.has(run.id));
+  const areAllRunsSelected = orderedRuns.length > 0 && orderedRuns.every((run) => selectedRunIds.has(run.id));
+  const runDeletePreviewTitle = runDeleteIntent?.runIds[0] ? getScheduledRunTitle(runDeleteIntent.runIds[0]) : '';
+  const mergedScheduledHistory = Array.from(
+    new Map(
+      [
+        ...runs.map((run) => [run.id, run] as const),
+        ...Object.values(persistedScheduledRuns).map((run) => [
+          run.id,
+          {
+            ...(runs.find((entry) => entry.id === run.id) || {}),
+            ...run,
+          },
+        ] as const),
+      ]
+    ).values()
+  );
   const historyEntries = [
     ...items.map((item) => ({
       id: `manual:${item.id}`,
       source: 'manual' as const,
       targetId: item.id,
       timestamp: item.timestamp,
-      title: formatPartLabel(item.partIndex, item.partCount) ? `${item.prompt} (${formatPartLabel(item.partIndex, item.partCount)})` : item.prompt,
+      title: item.prompt,
       body: item.answer || 'No answer',
       partIndex: item.partIndex,
-      playable: Boolean(item.audioBuffer),
+      playable: Boolean(item.audioBuffer || item.audioParts?.length),
       isActive: item.status === ItemStatus.PLAYING || selectedItemId === item.id,
       onPlay: () => {
-        if (!item.audioBuffer) return;
+        if (!item.audioBuffer && !item.audioParts?.length) return;
         setSelectedItemId(item.id);
         setPlayerAutoplayRequestId(`manual:${item.id}`);
         setActiveTab('player');
@@ -1015,15 +1247,15 @@ const App: React.FC = () => {
         void handleManualHistoryDelete(item.id);
       },
     })),
-    ...persistedScheduledHistory.map((run) => ({
+    ...mergedScheduledHistory.map((run) => ({
       id: `scheduled:${run.id}`,
       source: 'scheduled' as const,
       targetId: run.id,
       timestamp: new Date(run.startedAt).getTime(),
-      title: formatPartLabel(run.partIndex, run.partCount) ? `${run.resolvedPrompt} (${formatPartLabel(run.partIndex, run.partCount)})` : run.resolvedPrompt,
+      title: run.resolvedPrompt || run.generatedText || run.id,
       body: run.generatedText || run.errorMessage || 'No text available',
       partIndex: run.partIndex,
-      playable: Boolean(run.audioWavBase64 || run.audioPath),
+      playable: Boolean(('audioWavBase64' in run && run.audioWavBase64) || run.audioPath || run.audioParts?.length),
       isActive: playerAutoplayRequestId === `scheduled:${run.id}`,
       onPlay: () => {
         setSelectedItemId(null);
@@ -1094,7 +1326,7 @@ const App: React.FC = () => {
             continue;
           }
         } else {
-          const deleted = await deleteScheduledHistoryItem(entry.targetId);
+          const deleted = await deleteScheduledRunRecord(entry.targetId);
           if (!deleted) {
             failureCount += 1;
             failedIds.add(entry.id);
@@ -1133,6 +1365,15 @@ const App: React.FC = () => {
       checkbox.indeterminate = selectedCount > 0 && selectedCount < group.entries.length;
     });
   }, [historyGroups, selectedHistoryEntryIds]);
+  useEffect(() => {
+    if (!editingSchedule) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      scheduleFormShellRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }, [editingSchedule]);
   const adminPanel = <>
       <div className="flex items-center justify-between">
         <div>
@@ -1152,6 +1393,7 @@ const App: React.FC = () => {
             <span className="block mb-1">Polling Interval (minutes)</span>
             <div className="flex gap-2">
               <select
+                aria-label="Polling interval preset"
                 value={POLLING_PRESETS.includes(schedulerIntervalMinutesDraft) ? schedulerIntervalMinutesDraft : 0}
                 onChange={(e) => {
                   const next = Number(e.target.value);
@@ -1168,6 +1410,7 @@ const App: React.FC = () => {
               </select>
               <input
                 type="number"
+                aria-label="Polling interval minutes"
                 min={1}
                 max={60}
                 value={schedulerIntervalMinutesDraft}
@@ -1179,6 +1422,7 @@ const App: React.FC = () => {
           <label className="text-sm text-slate-300">
             <span className="block mb-1">Timezone</span>
             <input
+              aria-label="Scheduler timezone"
               value={schedulerTimezoneDraft}
               onChange={(e) => setSchedulerTimezoneDraft(e.target.value)}
               placeholder="Europe/Paris"
@@ -1198,10 +1442,59 @@ const App: React.FC = () => {
         </div>
       </div>
       <div className="grid gap-6 lg:grid-cols-[minmax(0,420px),1fr]">
-        <ScheduleForm initialValue={editingSchedule} onSubmit={handleScheduleSave} onCancel={() => setEditingSchedule(null)} isSaving={isScheduleSaving} />
+        <div ref={scheduleFormShellRef} className="space-y-3">
+          <ScheduleForm
+            key={editingSchedule?.id || 'create-schedule'}
+            initialValue={editingSchedule}
+            onSubmit={handleScheduleSave}
+            onCancel={() => setEditingSchedule(null)}
+            isSaving={isScheduleSaving}
+          />
+        </div>
         <div className="space-y-4">
-          <button onClick={() => void refreshAdminData()} disabled={isAdminRefreshing} className={`px-3 py-2 rounded-lg text-sm font-semibold ${isAdminRefreshing ? 'bg-slate-800 text-slate-500' : 'bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700'}`}>{isAdminRefreshing ? 'Refreshing...' : 'Refresh'}</button>
-          <ScheduleList schedules={schedules} onEdit={setEditingSchedule} onDelete={handleScheduleDelete} onRunNow={handleScheduleRunNow} />
+          <div className="rounded-[1.4rem] border border-slate-800 bg-slate-900/90 p-4 shadow-[0_16px_44px_-28px_rgba(15,23,42,0.9)]">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h3 className="text-lg font-semibold tracking-tight text-white">Schedules</h3>
+                <p className="mt-1 text-sm text-slate-400">Review next run times, scan recent failures, and trigger mobile-friendly actions from one place.</p>
+              </div>
+              <div className="flex flex-col gap-2 sm:items-end">
+                <button
+                  onClick={() => void refreshAdminData()}
+                  disabled={isAdminRefreshing}
+                  className={`inline-flex min-h-[46px] items-center justify-center rounded-2xl px-4 py-3 text-sm font-semibold transition ${
+                    isAdminRefreshing
+                      ? 'bg-slate-800 text-slate-500'
+                      : 'border border-slate-700 bg-slate-800 text-slate-200 hover:bg-slate-700'
+                  }`}
+                >
+                  {isAdminRefreshing ? 'Refreshing...' : 'Refresh schedules'}
+                </button>
+                <div className="text-xs text-slate-500">
+                  {isAdminRefreshing ? 'Syncing schedules, runs, and scheduler config now.' : `${schedules.length} schedule(s) loaded`}
+                </div>
+              </div>
+            </div>
+          </div>
+          <ScheduleList
+            schedules={schedules}
+            onEdit={(schedule) => {
+              setPendingScheduleActionId(schedule.id);
+              setPendingScheduleActionType('edit');
+              setEditingSchedule(schedule);
+              addLog(`[Schedules] Editing "${schedule.name}" (${schedule.id}).`);
+              window.requestAnimationFrame(() => {
+                setPendingScheduleActionId((prev) => (prev === schedule.id ? null : prev));
+                setPendingScheduleActionType((prev) => (prev === 'edit' ? null : prev));
+              });
+            }}
+            onDelete={handleScheduleDelete}
+            onRunNow={handleScheduleRunNow}
+            onToggleEnabled={handleScheduleEnabledToggle}
+            editingScheduleId={editingSchedule?.id || null}
+            pendingScheduleActionId={pendingScheduleActionId}
+            pendingScheduleActionType={pendingScheduleActionType}
+          />
         </div>
       </div>
     </>;
@@ -1313,7 +1606,10 @@ const App: React.FC = () => {
         <UnifiedPlayer
           items={items}
           runs={runs}
+          playerUiState={playerUiState}
+          setPlayerUiState={setPlayerUiState}
           persistedScheduledRuns={persistedScheduledRuns}
+          setPersistedScheduledRuns={setPersistedScheduledRuns}
           setItems={setItems}
           setSelectedItemId={setSelectedItemId}
           addLog={addLog}
@@ -1322,6 +1618,7 @@ const App: React.FC = () => {
           scheduledAudioBuffersById={scheduledAudioBuffersById}
           scheduledAudioLoadStateById={scheduledAudioLoadStateById}
           scheduledAudioErrorsById={scheduledAudioErrorsById}
+          loadManualRunAudio={loadManualRunAudio}
           loadScheduledRunAudio={loadScheduledRunAudio}
         />
       )}
@@ -1382,6 +1679,7 @@ const App: React.FC = () => {
                         historyGroupCheckboxRefs.current[group.key] = node;
                       }}
                       type="checkbox"
+                      aria-label={`Select history entries for ${group.label}`}
                       checked={allSelected}
                       onChange={(event) => setHistoryDateSelection(group.entries.map((entry) => entry.id), event.target.checked)}
                       className="h-4 w-4 rounded border-slate-600 bg-slate-950 text-emerald-500 focus:ring-emerald-500"
@@ -1393,7 +1691,7 @@ const App: React.FC = () => {
                   </div>
                   <div className="text-xs text-slate-400">{selectedCount} selected</div>
                 </div>
-                {group.entries.map((entry) => <div key={entry.id} className={`rounded-lg border p-4 flex flex-col gap-2 ${entry.isActive ? 'border-emerald-500/60 bg-emerald-500/10' : 'border-slate-800 bg-slate-800/40'}`}><div className="flex justify-between items-start gap-4"><div className="flex min-w-0 flex-1 gap-3"><label className="mt-1 flex shrink-0 items-start"><input type="checkbox" checked={selectedHistoryEntryIds.has(entry.id)} onChange={(event) => updateHistorySelection(entry.id, event.target.checked)} className="h-4 w-4 rounded border-slate-600 bg-slate-950 text-emerald-500 focus:ring-emerald-500" /></label><div className="min-w-0 flex-1"><div className="flex items-center gap-2 mb-1"><div className="text-xs text-slate-500">{new Date(entry.timestamp).toLocaleString()}</div><span className={`text-[10px] uppercase tracking-wide px-2 py-1 rounded-full ${entry.source === 'manual' ? 'bg-blue-950/40 text-blue-300 border border-blue-900/40' : 'bg-emerald-950/40 text-emerald-300 border border-emerald-900/40'}`}>{entry.source}</span></div><div className="text-sm font-bold text-slate-100 break-words mb-1">{entry.title}</div><div className="text-xs text-slate-400 line-clamp-3">{entry.body}</div></div></div><div className="flex flex-col gap-2 shrink-0 w-32"><button onClick={entry.onPlay} disabled={!entry.playable} className={`px-3 py-2 rounded-md text-sm font-semibold flex items-center gap-2 justify-center ${entry.playable ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-slate-800 text-slate-500 cursor-not-allowed'}`}><PlayCircle size={16} /> Play</button><button onClick={entry.onDelete} className="px-3 py-2 rounded-md text-sm font-semibold bg-red-900/20 text-red-400 hover:bg-red-900/40 border border-red-900/30 flex items-center gap-2 justify-center"><Trash2 size={16} /> Delete</button></div></div></div>)}
+                {group.entries.map((entry) => <div key={entry.id} className={`rounded-lg border p-4 flex flex-col gap-2 ${entry.isActive ? 'border-emerald-500/60 bg-emerald-500/10' : 'border-slate-800 bg-slate-800/40'}`}><div className="flex justify-between items-start gap-4"><div className="flex min-w-0 flex-1 gap-3"><label className="mt-1 flex shrink-0 items-start"><input type="checkbox" aria-label={`Select history entry ${entry.title}`} checked={selectedHistoryEntryIds.has(entry.id)} onChange={(event) => updateHistorySelection(entry.id, event.target.checked)} className="h-4 w-4 rounded border-slate-600 bg-slate-950 text-emerald-500 focus:ring-emerald-500" /></label><div className="min-w-0 flex-1"><div className="flex items-center gap-2 mb-1"><div className="text-xs text-slate-500">{new Date(entry.timestamp).toLocaleString()}</div><span className={`text-[10px] uppercase tracking-wide px-2 py-1 rounded-full ${entry.source === 'manual' ? 'bg-blue-950/40 text-blue-300 border border-blue-900/40' : 'bg-emerald-950/40 text-emerald-300 border border-emerald-900/40'}`}>{entry.source}</span></div><div className="text-sm font-bold text-slate-100 break-words mb-1">{entry.title}</div><div className="text-xs text-slate-400 line-clamp-3">{entry.body}</div></div></div><div className="flex flex-col gap-2 shrink-0 w-32"><button onClick={entry.onPlay} disabled={!entry.playable} className={`px-3 py-2 rounded-md text-sm font-semibold flex items-center gap-2 justify-center ${entry.playable ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-slate-800 text-slate-500 cursor-not-allowed'}`}><PlayCircle size={16} /> Play</button><button onClick={entry.onDelete} className="px-3 py-2 rounded-md text-sm font-semibold bg-red-900/20 text-red-400 hover:bg-red-900/40 border border-red-900/30 flex items-center gap-2 justify-center"><Trash2 size={16} /> Delete</button></div></div></div>)}
               </div>
             );
           })}
@@ -1401,7 +1699,7 @@ const App: React.FC = () => {
       </div>}
 
       {activeTab === 'schedules' && <div className="space-y-4">{adminPanel}</div>}
-      {activeTab === 'runs' && <div className="space-y-4"><div className="flex items-center justify-between"><div><h2 className="text-xl font-semibold text-white">Scheduled Runs</h2><p className="text-sm text-slate-400">Latest automated or manual schedule executions.</p></div><button onClick={() => void refreshAdminData()} disabled={isAdminRefreshing} className={`px-3 py-2 rounded-lg text-sm font-semibold ${isAdminRefreshing ? 'bg-slate-800 text-slate-500' : 'bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700'}`}>{isAdminRefreshing ? 'Refreshing...' : 'Refresh'}</button></div>{adminError && <div className="text-sm text-red-400 bg-red-950/30 border border-red-900/30 rounded-md p-3">{adminError}</div>}<RunHistoryList runs={runs} /></div>}
+      {activeTab === 'runs' && <div className="space-y-4"><div className="flex items-center justify-between"><div><h2 className="text-xl font-semibold text-white">Scheduled Runs</h2><p className="text-sm text-slate-400">Latest automated or manual schedule executions.</p></div><button onClick={() => void refreshAdminData()} disabled={isAdminRefreshing || isDeletingRuns} className={`px-3 py-2 rounded-lg text-sm font-semibold ${isAdminRefreshing || isDeletingRuns ? 'bg-slate-800 text-slate-500' : 'bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700'}`}>{isAdminRefreshing ? 'Refreshing...' : 'Refresh'}</button></div>{adminError && <div className="text-sm text-red-400 bg-red-950/30 border border-red-900/30 rounded-md p-3">{adminError}</div>}{runDeleteIntent && <div className="relative overflow-hidden rounded-2xl border border-red-500/30 bg-[radial-gradient(circle_at_top_left,_rgba(248,113,113,0.18),_transparent_42%),linear-gradient(135deg,rgba(69,10,10,0.92),rgba(24,24,27,0.96))] p-5 shadow-[0_24px_64px_rgba(15,23,42,0.45)]"><div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between"><div className="space-y-2"><div className="inline-flex items-center gap-2 rounded-full border border-red-400/30 bg-red-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-red-200"><AlertTriangle size={14} />{runDeleteIntent.mode === 'bulk' ? `Delete ${runDeleteIntent.runIds.length} Scheduled Runs` : 'Delete Scheduled Run'}</div><div className="text-sm leading-6 text-red-50">{runDeleteIntent.mode === 'bulk' ? `This will permanently remove ${runDeleteIntent.runIds.length} scheduled runs from cloud-backed history and clear any local cached playback data for them.` : `This will permanently remove "${runDeletePreviewTitle}" from cloud-backed history and clear its local cached playback data.`}</div><div className="text-xs text-red-200/80">{runDeleteIntent.mode === 'bulk' ? `${selectedRuns.length} currently selected.` : 'This action cannot be undone in the current UI.'}</div></div><div className="flex flex-wrap items-center gap-3"><button onClick={cancelRunDelete} disabled={isDeletingRuns} className={`rounded-xl border px-4 py-2 text-sm font-semibold ${isDeletingRuns ? 'border-slate-700 bg-slate-900/60 text-slate-500' : 'border-slate-600 bg-slate-950/60 text-slate-100 hover:bg-slate-900'}`}>Cancel</button><button onClick={() => void handleConfirmRunDelete()} disabled={isDeletingRuns} className={`rounded-xl px-4 py-2 text-sm font-semibold ${isDeletingRuns ? 'bg-red-950/60 text-red-300' : 'bg-red-500 text-white shadow-[0_10px_30px_rgba(239,68,68,0.35)] hover:bg-red-400'}`}>{isDeletingRuns ? 'Deleting...' : 'Delete'}</button></div></div></div>}<RunHistoryList runs={orderedRuns} selectedRunIds={selectedRunIds} pendingRunDeleteIds={pendingRunDeleteIds} isDeletingRuns={isDeletingRuns} onToggleRunSelection={updateRunSelection} onSelectAllRuns={() => setSelectedRunIds(new Set(orderedRuns.map((run) => run.id)))} onClearRunSelection={clearRunSelection} onRequestDeleteRun={requestRunDelete} onRequestBulkDeleteRuns={requestBulkRunDelete} /></div>}
     </div>
   );
 };
