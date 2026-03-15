@@ -1543,10 +1543,30 @@ const App: React.FC = () => {
   }
 
   return (
-    <div className="max-w-6xl mx-auto p-6 md:p-12">
-      <header className="mb-10 text-center">
-        <h1 className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-emerald-400 mb-2">Gemini Audio Summarizer</h1>
-        <p className="text-slate-400">Manual prompts, scheduled runs, and stored audio from one app.</p>
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(34,211,238,0.12),_transparent_22%),radial-gradient(circle_at_bottom,_rgba(16,185,129,0.12),_transparent_26%),linear-gradient(180deg,#020617_0%,#0f172a_58%,#111827_100%)]">
+      <div className="mx-auto max-w-6xl px-3 pb-16 pt-4 sm:px-4 md:px-6 md:pb-20 md:pt-8 lg:px-8">
+      <header className="mb-6 rounded-[1.75rem] border border-slate-800/90 bg-slate-950/65 px-4 py-5 text-left shadow-[0_22px_60px_-32px_rgba(15,23,42,0.95)] backdrop-blur sm:px-6 sm:py-6">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div className="max-w-3xl">
+            <div className="inline-flex items-center rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-200">
+              Mobile Operations Console
+            </div>
+            <h1 className="mt-3 text-3xl font-bold leading-tight tracking-tight text-white sm:text-4xl">Gemini Audio Summarizer</h1>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-300 sm:text-base">
+              Manual prompts, schedule control, cloud-backed history, and playback in one compact workspace that now holds up on a phone.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-3 sm:max-w-sm">
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/80 px-3 py-3">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500">Manual</div>
+              <div className="mt-1 text-lg font-semibold text-white">{items.length}</div>
+            </div>
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/80 px-3 py-3">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500">Schedules</div>
+              <div className="mt-1 text-lg font-semibold text-white">{schedules.length}</div>
+            </div>
+          </div>
+        </div>
       </header>
       {activeRateLimitWarnings.length > 0 && (
         <div className="mb-6 rounded-2xl border border-amber-500/40 bg-amber-500/10 p-4 shadow-lg shadow-amber-950/20">
@@ -1565,16 +1585,16 @@ const App: React.FC = () => {
         </div>
       )}
       <InputSection onProcess={processPrompts} isProcessing={isProcessingActive} warningMessage={generationWarningMessage} />
-      <div className="mb-6 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div className="flex flex-wrap gap-3">
+      <div className="mb-6 rounded-[1.4rem] border border-slate-800/90 bg-slate-950/60 p-2 shadow-[0_20px_50px_-32px_rgba(15,23,42,0.95)] backdrop-blur">
+        <div className="flex gap-2 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {(['results', 'player', 'history', 'schedules', 'runs'] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`px-4 py-2 rounded-lg font-semibold transition-all flex items-center gap-2 ${
+              className={`min-h-[48px] shrink-0 rounded-2xl px-4 py-2.5 font-semibold capitalize transition-all flex items-center gap-2 ${
                 activeTab === tab
-                  ? 'bg-slate-800 text-white border border-slate-600 shadow'
-                  : 'bg-slate-900 text-slate-400 border border-slate-800'
+                  ? 'border border-cyan-400/30 bg-cyan-500/15 text-white shadow-[0_10px_30px_rgba(8,145,178,0.18)]'
+                  : 'border border-slate-800 bg-slate-900/90 text-slate-400'
               }`}
             >
               {tab === 'player' && <ListMusic size={18} />}
@@ -1583,7 +1603,6 @@ const App: React.FC = () => {
             </button>
           ))}
         </div>
-
       </div>
 
       {activeTab === 'results' && <>
@@ -1699,7 +1718,8 @@ const App: React.FC = () => {
       </div>}
 
       {activeTab === 'schedules' && <div className="space-y-4">{adminPanel}</div>}
-      {activeTab === 'runs' && <div className="space-y-4"><div className="flex items-center justify-between"><div><h2 className="text-xl font-semibold text-white">Scheduled Runs</h2><p className="text-sm text-slate-400">Latest automated or manual schedule executions.</p></div><button onClick={() => void refreshAdminData()} disabled={isAdminRefreshing || isDeletingRuns} className={`px-3 py-2 rounded-lg text-sm font-semibold ${isAdminRefreshing || isDeletingRuns ? 'bg-slate-800 text-slate-500' : 'bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700'}`}>{isAdminRefreshing ? 'Refreshing...' : 'Refresh'}</button></div>{adminError && <div className="text-sm text-red-400 bg-red-950/30 border border-red-900/30 rounded-md p-3">{adminError}</div>}{runDeleteIntent && <div className="relative overflow-hidden rounded-2xl border border-red-500/30 bg-[radial-gradient(circle_at_top_left,_rgba(248,113,113,0.18),_transparent_42%),linear-gradient(135deg,rgba(69,10,10,0.92),rgba(24,24,27,0.96))] p-5 shadow-[0_24px_64px_rgba(15,23,42,0.45)]"><div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between"><div className="space-y-2"><div className="inline-flex items-center gap-2 rounded-full border border-red-400/30 bg-red-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-red-200"><AlertTriangle size={14} />{runDeleteIntent.mode === 'bulk' ? `Delete ${runDeleteIntent.runIds.length} Scheduled Runs` : 'Delete Scheduled Run'}</div><div className="text-sm leading-6 text-red-50">{runDeleteIntent.mode === 'bulk' ? `This will permanently remove ${runDeleteIntent.runIds.length} scheduled runs from cloud-backed history and clear any local cached playback data for them.` : `This will permanently remove "${runDeletePreviewTitle}" from cloud-backed history and clear its local cached playback data.`}</div><div className="text-xs text-red-200/80">{runDeleteIntent.mode === 'bulk' ? `${selectedRuns.length} currently selected.` : 'This action cannot be undone in the current UI.'}</div></div><div className="flex flex-wrap items-center gap-3"><button onClick={cancelRunDelete} disabled={isDeletingRuns} className={`rounded-xl border px-4 py-2 text-sm font-semibold ${isDeletingRuns ? 'border-slate-700 bg-slate-900/60 text-slate-500' : 'border-slate-600 bg-slate-950/60 text-slate-100 hover:bg-slate-900'}`}>Cancel</button><button onClick={() => void handleConfirmRunDelete()} disabled={isDeletingRuns} className={`rounded-xl px-4 py-2 text-sm font-semibold ${isDeletingRuns ? 'bg-red-950/60 text-red-300' : 'bg-red-500 text-white shadow-[0_10px_30px_rgba(239,68,68,0.35)] hover:bg-red-400'}`}>{isDeletingRuns ? 'Deleting...' : 'Delete'}</button></div></div></div>}<RunHistoryList runs={orderedRuns} selectedRunIds={selectedRunIds} pendingRunDeleteIds={pendingRunDeleteIds} isDeletingRuns={isDeletingRuns} onToggleRunSelection={updateRunSelection} onSelectAllRuns={() => setSelectedRunIds(new Set(orderedRuns.map((run) => run.id)))} onClearRunSelection={clearRunSelection} onRequestDeleteRun={requestRunDelete} onRequestBulkDeleteRuns={requestBulkRunDelete} /></div>}
+      {activeTab === 'runs' && <div className="space-y-4"><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-xl font-semibold text-white">Scheduled Runs</h2><p className="text-sm text-slate-400">Latest automated or manual schedule executions.</p></div><button onClick={() => void refreshAdminData()} disabled={isAdminRefreshing || isDeletingRuns} className={`min-h-[46px] rounded-2xl px-4 py-2 text-sm font-semibold ${isAdminRefreshing || isDeletingRuns ? 'bg-slate-800 text-slate-500' : 'bg-slate-800 text-slate-200 border border-slate-700 hover:bg-slate-700'}`}>{isAdminRefreshing ? 'Refreshing...' : 'Refresh'}</button></div>{adminError && <div className="text-sm text-red-400 bg-red-950/30 border border-red-900/30 rounded-md p-3">{adminError}</div>}{runDeleteIntent && <div className="relative overflow-hidden rounded-2xl border border-red-500/30 bg-[radial-gradient(circle_at_top_left,_rgba(248,113,113,0.18),_transparent_42%),linear-gradient(135deg,rgba(69,10,10,0.92),rgba(24,24,27,0.96))] p-5 shadow-[0_24px_64px_rgba(15,23,42,0.45)]"><div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between"><div className="space-y-2"><div className="inline-flex items-center gap-2 rounded-full border border-red-400/30 bg-red-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-red-200"><AlertTriangle size={14} />{runDeleteIntent.mode === 'bulk' ? `Delete ${runDeleteIntent.runIds.length} Scheduled Runs` : 'Delete Scheduled Run'}</div><div className="text-sm leading-6 text-red-50">{runDeleteIntent.mode === 'bulk' ? `This will permanently remove ${runDeleteIntent.runIds.length} scheduled runs from cloud-backed history and clear any local cached playback data for them.` : `This will permanently remove "${runDeletePreviewTitle}" from cloud-backed history and clear its local cached playback data.`}</div><div className="text-xs text-red-200/80">{runDeleteIntent.mode === 'bulk' ? `${selectedRuns.length} currently selected.` : 'This action cannot be undone in the current UI.'}</div></div><div className="flex flex-wrap items-center gap-3"><button onClick={cancelRunDelete} disabled={isDeletingRuns} className={`min-h-[44px] rounded-xl border px-4 py-2 text-sm font-semibold ${isDeletingRuns ? 'border-slate-700 bg-slate-900/60 text-slate-500' : 'border-slate-600 bg-slate-950/60 text-slate-100 hover:bg-slate-900'}`}>Cancel</button><button onClick={() => void handleConfirmRunDelete()} disabled={isDeletingRuns} className={`min-h-[44px] rounded-xl px-4 py-2 text-sm font-semibold ${isDeletingRuns ? 'bg-red-950/60 text-red-300' : 'bg-red-500 text-white shadow-[0_10px_30px_rgba(239,68,68,0.35)] hover:bg-red-400'}`}>{isDeletingRuns ? 'Deleting...' : 'Delete'}</button></div></div></div>}<RunHistoryList runs={orderedRuns} selectedRunIds={selectedRunIds} pendingRunDeleteIds={pendingRunDeleteIds} isDeletingRuns={isDeletingRuns} onToggleRunSelection={updateRunSelection} onSelectAllRuns={() => setSelectedRunIds(new Set(orderedRuns.map((run) => run.id)))} onClearRunSelection={clearRunSelection} onRequestDeleteRun={requestRunDelete} onRequestBulkDeleteRuns={requestBulkRunDelete} /></div>}
+      </div>
     </div>
   );
 };
