@@ -72,6 +72,21 @@ function normalizeToolOptions(toolOptions = {}, existing = {}) {
   };
 }
 
+function normalizeAudioParts(audioParts, existing = []) {
+  const source = Array.isArray(audioParts) ? audioParts : existing;
+  return source
+    .filter((part) => part && Number.isFinite(Number(part.partIndex)))
+    .map((part, index) => ({
+      partIndex: Math.max(1, Number(part.partIndex || index + 1)),
+      partCount: Math.max(1, Number(part.partCount || source.length || existing.length || 1)),
+      text: String(part.text || '').trim(),
+      audioPath: part.audioPath ?? '',
+      audioDownloadUrl: part.audioDownloadUrl ?? '',
+      durationSeconds: part.durationSeconds != null ? Number(part.durationSeconds) : undefined,
+    }))
+    .sort((a, b) => a.partIndex - b.partIndex);
+}
+
 function normalizeManualRun(input, existing = null) {
   const now = new Date().toISOString();
   const toolOptions = normalizeToolOptions(input.toolOptions || input, existing?.toolOptions || {});
@@ -88,6 +103,7 @@ function normalizeManualRun(input, existing = null) {
     ttsModel: String(input.ttsModel || existing?.ttsModel || DEFAULT_TTS_MODEL).trim() || DEFAULT_TTS_MODEL,
     toolOptions,
     audioPath: input.audioPath ?? existing?.audioPath ?? '',
+    audioParts: normalizeAudioParts(input.audioParts, existing?.audioParts || []),
     audioDownloadUrl: input.audioDownloadUrl ?? existing?.audioDownloadUrl ?? '',
     textPath: input.textPath ?? existing?.textPath ?? '',
     errorMessage: input.errorMessage ?? existing?.errorMessage ?? '',

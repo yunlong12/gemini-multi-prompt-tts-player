@@ -1,4 +1,4 @@
-import { GroundingUrl } from "../types";
+import { AudioPart, GroundingUrl, PlayerUiState } from "../types";
 
 export interface PersistedItem {
   id: string;
@@ -9,6 +9,7 @@ export interface PersistedItem {
   audioPath?: string;
   audioDownloadUrl?: string;
   textPath?: string;
+  audioParts?: AudioPart[];
   ttsModel?: string;
   enableGoogleSearch?: boolean;
   enableUrlContext?: boolean;
@@ -31,6 +32,7 @@ export interface PersistedScheduledRun {
   generatedText?: string;
   groundingLinks: GroundingUrl[];
   audioPath?: string;
+  audioParts?: AudioPart[];
   textPath?: string;
   audioDownloadUrl?: string;
   errorMessage?: string;
@@ -45,6 +47,7 @@ export interface PersistedScheduledRun {
 export interface PersistedState {
   items: PersistedItem[];
   scheduledRuns: PersistedScheduledRun[];
+  playerUiState?: PlayerUiState;
   recentPrompts: string[];
   updatedAt: number;
 }

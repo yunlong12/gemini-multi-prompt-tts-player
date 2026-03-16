@@ -53,13 +53,24 @@ export async function executeSchedule(schedule, options = {}) {
       ttsModel: schedule.ttsModel,
       toolOptions,
     });
-    const audioInfo = await saveAudio({
-      scheduleId: schedule.id,
-      runId,
-      startedAt,
-      outputPrefix: schedule.outputPrefix,
-      wavBuffer: artifacts.wavBuffer,
-    });
+    const audioParts = [];
+    for (const part of artifacts.audioParts) {
+      const audioInfo = await saveAudio({
+        scheduleId: schedule.id,
+        runId,
+        startedAt,
+        outputPrefix: schedule.outputPrefix,
+        wavBuffer: part.wavBuffer,
+        partIndex: part.partIndex,
+      });
+      audioParts.push({
+        partIndex: part.partIndex,
+        partCount: part.partCount,
+        text: part.text,
+        audioPath: audioInfo.audioPath,
+        audioDownloadUrl: audioInfo.audioDownloadUrl,
+      });
+    }
     const finishedAt = new Date().toISOString();
     const textInfo = await saveTextArtifact({
       scheduleId: schedule.id,
@@ -77,7 +88,8 @@ export async function executeSchedule(schedule, options = {}) {
         ttsModel: schedule.ttsModel,
         toolOptions: artifacts.toolOptions,
         chunkCount: artifacts.chunkCount,
-        audioPath: audioInfo.audioPath,
+        audioPath: '',
+        audioParts,
       },
     });
     const recordedRun = await recordRun({
@@ -90,9 +102,10 @@ export async function executeSchedule(schedule, options = {}) {
       resolvedPrompt,
       generatedText: artifacts.text,
       groundingLinks: artifacts.groundingLinks,
-      audioPath: audioInfo.audioPath,
+      audioPath: '',
+      audioParts,
       textPath: textInfo.textPath,
-      audioDownloadUrl: audioInfo.audioDownloadUrl,
+      audioDownloadUrl: '',
       errorMessage: '',
     });
 

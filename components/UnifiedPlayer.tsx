@@ -33,6 +33,15 @@ const formatPlayerTimestamp = (timestamp: number) => new Date(timestamp).toLocal
 const formatTime = (seconds: number) => !seconds || Number.isNaN(seconds) ? '0:00' : `${Math.floor(seconds / 60)}:${Math.floor(seconds % 60).toString().padStart(2, '0')}`;
 const sortAudioParts = (audioParts: AudioPart[] | undefined) => [...(audioParts || [])].sort((a, b) => a.partIndex - b.partIndex);
 const canPlayPlayerItem = (item: PlayerItem | null) => Boolean(item && (item.audioBuffer || item.audioUrl || item.audioParts?.some((part) => part.audioPath)) && item.status !== 'error');
+const canResolveQueueSegment = (item: PlayerItem | undefined, segment: Segment) => {
+  if (!item) {
+    return false;
+  }
+  if (segment.legacy) {
+    return canPlayPlayerItem(item);
+  }
+  return Boolean(item.audioParts?.some((part) => part.partIndex === segment.partIndex && part.audioPath));
+};
 
 export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
   items, runs, playerUiState, setPlayerUiState, persistedScheduledRuns, setPersistedScheduledRuns, setItems, setSelectedItemId, addLog, autoplayRequestId, onAutoplayRequestHandled,
@@ -99,6 +108,7 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
   const playerItemIdsSignature = playerItems.map((item) => item.id).join('|');
 
   useEffect(() => {
+    const playerItemsById = new Map(playerItems.map((item) => [item.id, item]));
     setPlayerUiState((prev) => {
       const nextChecked = Object.fromEntries(
         playerItems.map((item) => [item.id, Object.prototype.hasOwnProperty.call(prev.checkedPlayerItemIds, item.id) ? prev.checkedPlayerItemIds[item.id] : false])
@@ -110,10 +120,21 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
             Object.entries(prev.expandedAudioPartKeys).filter(([key]) => key.startsWith(`${nextSelectedPlayerItemId}:`))
           )
         : {};
-      const nextQueue = prev.queue.filter((segment) => validIds.has(segment.playerItemId));
+      const nextQueue = prev.queue.filter((segment) => canResolveQueueSegment(playerItemsById.get(segment.playerItemId), segment));
       const nextQueueIndex = nextQueue.length ? Math.min(prev.queueIndex, nextQueue.length - 1) : 0;
+      const currentSegment = prev.queue[prev.queueIndex] || null;
+      const currentSegmentStillResolvable = currentSegment
+        ? canResolveQueueSegment(playerItemsById.get(currentSegment.playerItemId), currentSegment)
+        : false;
       const nextCurrentlyPlayingPlayerItemId =
-        prev.currentlyPlayingPlayerItemId && validIds.has(prev.currentlyPlayingPlayerItemId) ? prev.currentlyPlayingPlayerItemId : null;
+        prev.currentlyPlayingPlayerItemId && validIds.has(prev.currentlyPlayingPlayerItemId)
+          ? prev.currentlyPlayingPlayerItemId
+          : currentSegmentStillResolvable
+            ? currentSegment?.playerItemId || null
+            : null;
+      const shouldKeepPlaybackSession =
+        prev.isPlayerPlaying &&
+        ((prev.currentlyPlayingPlayerItemId && validIds.has(prev.currentlyPlayingPlayerItemId)) || currentSegmentStillResolvable);
 
       return {
         ...prev,
@@ -128,7 +149,7 @@ export const UnifiedPlayer: React.FC<UnifiedPlayerProps> = ({
         playerDuration: nextSelectedPlayerItemId ? prev.playerDuration : 0,
         pauseOffset: nextSelectedPlayerItemId ? prev.pauseOffset : 0,
         isPlayingSequence: nextQueue.length > 1 ? prev.isPlayingSequence : false,
-        isPlayerPlaying: false,
+        isPlayerPlaying: shouldKeepPlaybackSession,
       };
     });
   }, [playerItemIdsSignature]);

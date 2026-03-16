@@ -20,19 +20,19 @@ Required inspection commands, in this exact order:
    - `gcloud config list --format=json`
    - `gcloud auth list --format=json`
 2. Inspect existing Cloud Run services
-   - `gcloud run services list --project western-creek-489616-m3 --format=json`
+   - `gcloud run services list --project gen-lang-client-0354055629 --format=json`
 3. Inspect existing Cloud Scheduler jobs
-   - `gcloud scheduler jobs list --location us-central1 --project western-creek-489616-m3 --format=json`
+   - `gcloud scheduler jobs list --location us-central1 --project gen-lang-client-0354055629 --format=json`
 4. Inspect existing secrets
-   - `gcloud secrets list --project western-creek-489616-m3 --format=json`
+   - `gcloud secrets list --project gen-lang-client-0354055629 --format=json`
 5. Inspect existing service accounts
-   - `gcloud iam service-accounts list --project western-creek-489616-m3 --format=json`
+   - `gcloud iam service-accounts list --project gen-lang-client-0354055629 --format=json`
 6. Inspect existing buckets
-   - `gcloud storage buckets list --project western-creek-489616-m3 --format=json`
+   - `gcloud storage buckets list --project gen-lang-client-0354055629 --format=json`
 7. Inspect Firestore database
-   - `gcloud firestore databases describe --database='(default)' --project western-creek-489616-m3 --format=json`
+   - `gcloud firestore databases describe --database='(default)' --project gen-lang-client-0354055629 --format=json`
 8. Inspect Firestore composite indexes
-   - `gcloud firestore indexes composite list --project western-creek-489616-m3 --format=json`
+   - `gcloud firestore indexes composite list --project gen-lang-client-0354055629 --format=json`
 
 Deployment must not continue until this inspection pass is complete.
 
@@ -55,6 +55,8 @@ Resource reuse policy:
   job.
 - If Firestore is present but a query fails because of missing indexes, create
   only the required index. Do not rename collections or redesign storage.
+- If Cloud Storage signed URLs are used, verify the runtime service account can
+  sign blobs before deploying.
 
 Avoid these unless truly necessary:
 
@@ -93,20 +95,23 @@ Use these rules after the inspection pass:
 4. Current Verified Resources
 ========================================================================
 
-- Project ID: `western-creek-489616-m3`
+- Project ID: `gen-lang-client-0354055629`
 - Region: recommended `us-central1`
 - Cloud Run service: `gemini-multi-prompt-tts-player`
 - Cloud Scheduler job: `schedule-runner`
 - Cloud Storage bucket: private bucket for WAV and JSON artifacts
-- Official user-facing app URL: `https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app`
-- Current runtime service account: `323507996614-compute@developer.gserviceaccount.com`
-- Service-generated Cloud Run alias: `https://gemini-multi-prompt-tts-player-ytzgvkfttq-uc.a.run.app`
+- Official user-facing app URL: `https://gemini-multi-prompt-tts-player-305416593596.us-central1.run.app`
+- Current runtime service account: `305416593596-compute@developer.gserviceaccount.com`
+- Service-generated Cloud Run alias: `https://gemini-multi-prompt-tts-player-7kce3noezq-uc.a.run.app`
 - Current Cloud Run memory: `1Gi`
 - Current Cloud Run min instances: `1`
 - Current Cloud Run max instances: `10`
 - Current TTS chunk concurrency: `2`
-- Deprecated old-project URL: `https://gemini-multi-prompt-tts-player-7kce3noezq-uc.a.run.app`
-- Deprecated old-project canonical URL: `https://gemini-multi-prompt-tts-player-305416593596.us-central1.run.app`
+- Current signed-URL permission:
+  - runtime service account `305416593596-compute@developer.gserviceaccount.com`
+  - self-bound with `roles/iam.serviceAccountTokenCreator`
+- Previous alternate deployment project: `western-creek-489616-m3`
+- Previous alternate deployment URL: `https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app`
 - Current health endpoint: `GET /api/health`
 - Current Firestore due-schedule index requirement:
   - `schedules(enabled ASC, nextRunAt ASC)`
@@ -117,9 +122,8 @@ Use these rules after the inspection pass:
 URL usage policy:
 
 - Use only the official user-facing app URL in bookmarks, browser sessions, and docs.
-- Do not use the old-project `7kce3noezq` / `305416593596` URLs. Those point to
-  an older deployment in project `gen-lang-client-0354055629`.
-- Do not treat the service-generated `ytzgvkfttq` alias as the primary app entry.
+- Do not use the `western-creek-489616-m3` deployment as the active production target for this app.
+- Do not treat the service-generated `7kce3noezq` alias as the primary app entry.
 
 ========================================================================
 5. Required Secrets
@@ -147,6 +151,8 @@ Current project note:
   `gemini-key:latest`.
 - The other three values can be provided either via Secret Manager or direct
   Cloud Run env vars if you are minimizing project changes.
+- If you rely on GCS signed URLs, the runtime service account also needs
+  `roles/iam.serviceAccountTokenCreator` on itself.
 
 ========================================================================
 6. Required Environment Variables
@@ -179,7 +185,7 @@ Recommended values:
 `ALLOWED_ORIGINS` must be a comma-separated allowlist of browser origins that
 are allowed to submit state-changing requests. Example:
 
-`ALLOWED_ORIGINS=https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app`
+`ALLOWED_ORIGINS=https://gemini-multi-prompt-tts-player-305416593596.us-central1.run.app`
 
 If both are present, `GEMINI_API_KEYS` takes precedence over `GEMINI_API_KEY`.
 
@@ -206,7 +212,7 @@ Known failure mode:
 
 Current required command:
 
-`gcloud firestore indexes composite create --project western-creek-489616-m3 --collection-group=schedules --field-config="field-path=enabled,order=ascending" --field-config="field-path=nextRunAt,order=ascending"`
+`gcloud firestore indexes composite create --project gen-lang-client-0354055629 --collection-group=schedules --field-config="field-path=enabled,order=ascending" --field-config="field-path=nextRunAt,order=ascending"`
 
 ========================================================================
 8. Cloud Run Deploy Command
@@ -218,11 +224,15 @@ If the service already exists, this command updates it in place.
 
 gcloud run deploy gemini-multi-prompt-tts-player ^
   --source . ^
-  --project western-creek-489616-m3 ^
+  --project gen-lang-client-0354055629 ^
   --region us-central1 ^
   --allow-unauthenticated ^
-  --service-account 323507996614-compute@developer.gserviceaccount.com ^
-  --set-secrets GEMINI_API_KEY=gemini-key:latest,GEMINI_API_KEYS=gemini-key:latest ^
+  --service-account 305416593596-compute@developer.gserviceaccount.com ^
+  --set-secrets GEMINI_API_KEY=GEMINI_API_KEY:latest ^
+  --set-secrets GEMINI_API_KEYS=GEMINI_API_KEY:latest ^
+  --set-secrets APP_ADMIN_PASSWORD=APP_ADMIN_PASSWORD:latest ^
+  --set-secrets ADMIN_SESSION_SECRET=ADMIN_SESSION_SECRET:latest ^
+  --set-secrets SCHEDULER_SHARED_SECRET=SCHEDULER_SHARED_SECRET:latest ^
   --env-vars-file C:\path\to\cloudrun-env.yaml ^
   --min-instances 1 ^
   --max-instances 10 ^
@@ -239,6 +249,15 @@ Notes:
   runs exceeded the earlier `512Mi` limit during audio merge/upload
 - `max-instances=10` is the current scale setting used to handle concurrent scheduled work
 - Do not include `PORT` in `--set-env-vars`; Cloud Run reserves it
+- On Windows PowerShell, do not use a long raw `--set-env-vars "A=...,B=...,C=..."`
+  string as the primary deploy method for production. On 2026-03-14 this caused
+  a real incident where multiple env vars were concatenated into
+  `APP_ADMIN_PASSWORD`, which broke login.
+- For production deploys, prefer `--env-vars-file` for non-secret env vars and
+  use separate `--set-secrets` flags for secrets. Reserve `--set-env-vars` /
+  `--update-env-vars` for small targeted changes only.
+- Before treating deployment as complete, verify the runtime service account has
+  blob-signing permission if signed URLs are expected
 
 ========================================================================
 9. Scheduler Job
@@ -257,11 +276,11 @@ If the job already exists, update it instead of creating a duplicate.
 Example create command:
 
 gcloud scheduler jobs create http schedule-runner ^
-  --project=western-creek-489616-m3 ^
+  --project=gen-lang-client-0354055629 ^
   --location=us-central1 ^
   --schedule="*/5 * * * *" ^
   --time-zone="Europe/Paris" ^
-  --uri="https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app/api/internal/run-due-schedules" ^
+  --uri="https://gemini-multi-prompt-tts-player-305416593596.us-central1.run.app/api/internal/run-due-schedules" ^
   --http-method=POST ^
   --headers="X-Internal-Key=YOUR_SCHEDULER_SHARED_SECRET,Content-Type=application/json" ^
   --message-body="{}"
@@ -269,11 +288,11 @@ gcloud scheduler jobs create http schedule-runner ^
 Example update command:
 
 gcloud scheduler jobs update http schedule-runner ^
-  --project=western-creek-489616-m3 ^
+  --project=gen-lang-client-0354055629 ^
   --location=us-central1 ^
   --schedule="*/5 * * * *" ^
   --time-zone="Europe/Paris" ^
-  --uri="https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app/api/internal/run-due-schedules" ^
+  --uri="https://gemini-multi-prompt-tts-player-305416593596.us-central1.run.app/api/internal/run-due-schedules" ^
   --update-headers="X-Internal-Key=YOUR_SCHEDULER_SHARED_SECRET,Content-Type=application/json" ^
   --message-body="{}"
 
@@ -324,10 +343,10 @@ Health endpoint:
 
 Required post-deploy verification commands:
 
-- `Invoke-WebRequest -UseBasicParsing https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app/api/health`
-- `gcloud run services describe gemini-multi-prompt-tts-player --project western-creek-489616-m3 --region us-central1 --format=json`
-- `gcloud scheduler jobs describe schedule-runner --location us-central1 --project western-creek-489616-m3 --format=json`
-- `gcloud scheduler jobs run schedule-runner --location us-central1 --project western-creek-489616-m3`
+- `Invoke-WebRequest -UseBasicParsing https://gemini-multi-prompt-tts-player-305416593596.us-central1.run.app/api/health`
+- `gcloud run services describe gemini-multi-prompt-tts-player --project gen-lang-client-0354055629 --region us-central1 --format=json`
+- `gcloud scheduler jobs describe schedule-runner --location us-central1 --project gen-lang-client-0354055629 --format=json`
+- `gcloud scheduler jobs run schedule-runner --location us-central1 --project gen-lang-client-0354055629`
 
 Read Cloud Run logs:
 
@@ -335,4 +354,45 @@ gcloud run services logs read gemini-multi-prompt-tts-player --region us-central
 
 Describe service:
 
-gcloud run services describe gemini-multi-prompt-tts-player --project western-creek-489616-m3 --region us-central1
+gcloud run services describe gemini-multi-prompt-tts-player --project gen-lang-client-0354055629 --region us-central1
+
+Mandatory env verification after deploy:
+
+- Inspect `spec.template.spec.containers[0].env` in `gcloud run services describe ... --format=json`
+- Confirm `APP_ADMIN_PASSWORD` is a standalone value, not a concatenated string
+- Confirm `ADMIN_SESSION_SECRET`, `SCHEDULER_SHARED_SECRET`, `GCS_BUCKET_NAME`,
+  `APP_DEFAULT_TIMEZONE`, Firestore collection names, and `TTS_CHUNK_CONCURRENCY`
+  each appear as separate env entries
+- If login suddenly fails after deploy, check this before debugging auth logic
+
+Signed URL permission verification:
+
+- `gcloud iam service-accounts get-iam-policy 305416593596-compute@developer.gserviceaccount.com --project gen-lang-client-0354055629`
+- Confirm the policy includes:
+  - member `serviceAccount:305416593596-compute@developer.gserviceaccount.com`
+  - role `roles/iam.serviceAccountTokenCreator`
+
+Required fix if missing:
+
+`gcloud iam service-accounts add-iam-policy-binding 305416593596-compute@developer.gserviceaccount.com --project gen-lang-client-0354055629 --member="serviceAccount:305416593596-compute@developer.gserviceaccount.com" --role="roles/iam.serviceAccountTokenCreator"`
+
+Known manual-run artifact failure mode:
+
+- If logs show `Permission 'iam.serviceAccounts.signBlob' denied on resource`
+  after `audio.merge.success`, the WAV may already exist in GCS even though the
+  manual run is marked failed.
+- Current code now mitigates this in two ways:
+  - `saveAudio()` falls back to `/api/artifacts/...` if signed URL generation fails
+  - `manualRunRunner` writes `audioPath` / `audioDownloadUrl` back to Firestore
+    immediately after audio save so the GUI can still fetch the file
+
+Known deployment failure mode from 2026-03-14:
+
+- Symptom: browser login returns `Invalid password` immediately after a deploy
+- Root cause: a PowerShell deploy used an unsafe long `--set-env-vars` string,
+  and Cloud Run stored one long concatenated value under `APP_ADMIN_PASSWORD`
+- Fix:
+  - re-run the env update using `--env-vars-file` or a safe targeted
+    `gcloud run services update ... --update-env-vars "KEY=value,KEY2=value2"`
+  - re-check `gcloud run services describe ... --format=json`
+  - verify `APP_ADMIN_PASSWORD` exactly matches the intended password

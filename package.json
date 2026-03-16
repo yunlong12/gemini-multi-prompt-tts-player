@@ -9,7 +9,10 @@
     "start": "node server/index.js",
     "gcp-build": "npm run build",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@google-cloud/firestore": "^7.11.6",
@@ -24,9 +27,16 @@
     "uuid": "^13.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "fake-indexeddb": "^6.2.5",
+    "jsdom": "^29.0.0",
     "typescript": "~5.8.2",
-    "vite": "^6.2.0"
+    "vite": "^6.2.0",
+    "vitest": "^4.1.0"
   }
 }

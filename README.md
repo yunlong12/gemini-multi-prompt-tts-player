@@ -265,18 +265,28 @@ mandatory and follows a minimal-change policy: reuse existing Cloud Run
 services, service accounts, secrets, buckets, scheduler jobs, and Firestore
 where possible, then create only what is missing.
 
+On Windows PowerShell, do not use a long raw `--set-env-vars "A=...,B=...,C=..."`
+string as the primary production deploy method. A real deploy mistake on
+2026-03-14 concatenated multiple env vars into `APP_ADMIN_PASSWORD` and broke
+login. Prefer `--env-vars-file` for non-secret env vars, then verify the final
+runtime env block with `gcloud run services describe ... --format=json`.
+
 Official production entry:
 
-- `https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app/`
-
-Deprecated old-project URLs:
-
-- `https://gemini-multi-prompt-tts-player-7kce3noezq-uc.a.run.app/`
 - `https://gemini-multi-prompt-tts-player-305416593596.us-central1.run.app/`
 
-Those deprecated URLs belong to the old project `gen-lang-client-0354055629`
-and can serve an older frontend bundle. Do not use them for production access
-or deployment validation.
+Current project alias URL:
+
+- `https://gemini-multi-prompt-tts-player-7kce3noezq-uc.a.run.app/`
+
+Previous alternate deployment project:
+
+- `western-creek-489616-m3`
+- `https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app/`
+
+Current production deployment now lives in `gen-lang-client-0354055629`.
+Do not use the `western-creek-489616-m3` deployment for production validation
+of this app anymore.
 
 Current production architecture:
 
@@ -291,6 +301,9 @@ Current production runtime profile:
 - Memory: `1Gi`
 - Minimum instances: `1`
 - TTS chunk concurrency: `2`
+- GCP project: `gen-lang-client-0354055629`
+- Runtime service account: `305416593596-compute@developer.gserviceaccount.com`
+- Artifact bucket: `gs://gemini-tts-daily-briefings-0354055629`
 
 Important runtime variables:
 
@@ -312,8 +325,11 @@ quota/overload errors. If it is unset, the server falls back to
 
 Current production mapping:
 
-- `GEMINI_API_KEY -> gemini-key:latest`
-- `GEMINI_API_KEYS -> gemini-key:latest`
+- `GEMINI_API_KEY -> GEMINI_API_KEY:latest`
+- `GEMINI_API_KEYS -> GEMINI_API_KEY:latest`
+- `APP_ADMIN_PASSWORD -> APP_ADMIN_PASSWORD:latest`
+- `ADMIN_SESSION_SECRET -> ADMIN_SESSION_SECRET:latest`
+- `SCHEDULER_SHARED_SECRET -> SCHEDULER_SHARED_SECRET:latest`
 
 ### Security Notes
 

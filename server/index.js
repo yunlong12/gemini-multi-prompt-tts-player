@@ -289,7 +289,8 @@ app.delete('/api/manual-runs/:id', requireAuth, requireTrustedOrigin, async (req
     }
 
     const artifactErrors = [];
-    for (const artifactPath of [run.audioPath, run.textPath].filter(Boolean)) {
+    const audioPartPaths = Array.isArray(run.audioParts) ? run.audioParts.map((part) => part.audioPath).filter(Boolean) : [];
+    for (const artifactPath of [...audioPartPaths, run.audioPath, run.textPath].filter(Boolean)) {
       try {
         await deleteArtifact(artifactPath);
       } catch (error) {
@@ -496,7 +497,8 @@ app.delete('/api/runs/:id', requireAuth, requireTrustedOrigin, async (req, res) 
 
     const artifactErrors = [];
 
-    for (const artifactPath of [run.audioPath, run.textPath].filter(Boolean)) {
+    const audioPartPaths = Array.isArray(run.audioParts) ? run.audioParts.map((part) => part.audioPath).filter(Boolean) : [];
+    for (const artifactPath of [...audioPartPaths, run.audioPath, run.textPath].filter(Boolean)) {
       try {
         await deleteArtifact(artifactPath);
       } catch (error) {

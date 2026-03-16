@@ -13,17 +13,19 @@ const shorten = (value: string, max = 72) => {
 };
 
 export const manualItemToPlayerItem = (item: ProcessItem): PlayerItem | null => {
-  if (!item.audioBuffer || item.status === ItemStatus.ERROR) {
+  if ((!item.audioBuffer && !item.audioPath && !item.audioDownloadUrl && !item.audioParts?.length) || item.status === ItemStatus.ERROR) {
     return null;
   }
 
-  const partLabel = formatPartLabel(item.partIndex, item.partCount);
+  const partLabel = !item.audioParts?.length ? formatPartLabel(item.partIndex, item.partCount) : '';
+  const audioUrl = item.audioDownloadUrl || (item.audioPath ? `/api/artifacts/${encodeURIComponent(item.audioPath)}` : undefined);
 
   return {
     id: `manual:${item.id}`,
     source: 'manual',
     title: shorten(partLabel ? `${item.prompt} (${partLabel})` : item.prompt),
     timestamp: item.timestamp,
+    audioParts: item.audioParts,
     partIndex: item.partIndex,
     partCount: item.partCount,
     partGroupId: item.partGroupId,
@@ -32,6 +34,8 @@ export const manualItemToPlayerItem = (item: ProcessItem): PlayerItem | null => 
     bodyText: item.answer || '',
     groundingLinks: item.groundingLinks || [],
     audioBuffer: item.audioBuffer,
+    audioUrl,
+    downloadUrl: audioUrl,
     localAudioBase64: item.audioBase64,
     error: item.error,
     ttsModel: item.ttsModel,
@@ -39,18 +43,19 @@ export const manualItemToPlayerItem = (item: ProcessItem): PlayerItem | null => 
 };
 
 export const scheduledRunToPlayerItem = (run: ScheduleRun): PlayerItem | null => {
-  if (run.status !== 'success' || !run.audioPath) {
+  if (run.status !== 'success' || (!run.audioPath && !run.audioParts?.length)) {
     return null;
   }
 
-  const audioUrl = `/api/artifacts/${encodeURIComponent(run.audioPath)}`;
-  const partLabel = formatPartLabel(run.partIndex, run.partCount);
+  const audioUrl = run.audioPath ? `/api/artifacts/${encodeURIComponent(run.audioPath)}` : undefined;
+  const partLabel = !run.audioParts?.length ? formatPartLabel(run.partIndex, run.partCount) : '';
 
   return {
     id: `scheduled:${run.id}`,
     source: 'scheduled',
     title: shorten(partLabel ? `${run.resolvedPrompt || run.generatedText || run.id} (${partLabel})` : (run.resolvedPrompt || run.generatedText || run.id)),
     timestamp: new Date(run.startedAt).getTime(),
+    audioParts: run.audioParts,
     partIndex: run.partIndex,
     partCount: run.partCount,
     partGroupId: run.partGroupId,

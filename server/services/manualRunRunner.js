@@ -74,13 +74,39 @@ async function processRun(runId) {
     });
 
     const startedAt = run.createdAt || new Date().toISOString();
-    await appendProgressLog(runId, 'Uploading merged audio.');
-    const audioInfo = await saveAudio({
-      scheduleId: 'manual',
-      runId,
-      startedAt,
-      outputPrefix: DEFAULT_OUTPUT_PREFIX,
-      wavBuffer: artifacts.wavBuffer,
+    await appendProgressLog(runId, `Uploading ${artifacts.audioParts.length} audio part(s).`);
+    const audioParts = [];
+    for (const part of artifacts.audioParts) {
+      await appendProgressLog(runId, `Uploading Part ${part.partIndex}/${part.partCount}.`);
+      const audioInfo = await saveAudio({
+        scheduleId: 'manual',
+        runId,
+        startedAt,
+        outputPrefix: DEFAULT_OUTPUT_PREFIX,
+        wavBuffer: part.wavBuffer,
+        partIndex: part.partIndex,
+      });
+      audioParts.push({
+        partIndex: part.partIndex,
+        partCount: part.partCount,
+        text: part.text,
+        audioPath: audioInfo.audioPath,
+        audioDownloadUrl: audioInfo.audioDownloadUrl,
+      });
+      await updateManualRun(runId, {
+        generatedText: artifacts.text,
+        groundingLinks: artifacts.groundingLinks,
+        audioParts: [...audioParts],
+        errorMessage: '',
+      });
+    }
+    await updateManualRun(runId, {
+      generatedText: artifacts.text,
+      groundingLinks: artifacts.groundingLinks,
+      audioPath: '',
+      audioDownloadUrl: '',
+      audioParts,
+      errorMessage: '',
     });
     const finishedAt = new Date().toISOString();
     await appendProgressLog(runId, 'Saving transcript artifact.');
@@ -97,7 +123,8 @@ async function processRun(runId) {
         ttsModel: run.ttsModel,
         toolOptions: artifacts.toolOptions,
         chunkCount: artifacts.chunkCount,
-        audioPath: audioInfo.audioPath,
+        audioPath: '',
+        audioParts,
         createdAt: run.createdAt,
         finishedAt,
       },
@@ -108,14 +135,20 @@ async function processRun(runId) {
       status: 'success',
       generatedText: artifacts.text,
       groundingLinks: artifacts.groundingLinks,
-      audioPath: audioInfo.audioPath,
-      audioDownloadUrl: audioInfo.audioDownloadUrl,
+      audioPath: '',
+      audioDownloadUrl: '',
+      audioParts,
       textPath: textInfo.textPath,
       errorMessage: '',
       finishedAt,
     });
 
-    logInfo('manualRunRunner', 'run.success', { runId, audioPath: audioInfo.audioPath, textPath: textInfo.textPath });
+    logInfo('manualRunRunner', 'run.success', {
+      runId,
+      audioPartCount: audioParts.length,
+      firstAudioPath: audioParts[0]?.audioPath || null,
+      textPath: textInfo.textPath,
+    });
     return updated;
   } catch (error) {
     const finishedAt = new Date().toISOString();

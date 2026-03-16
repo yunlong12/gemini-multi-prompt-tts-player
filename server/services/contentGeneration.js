@@ -1,5 +1,5 @@
 import { generateGroundedText, generateSpeechBase64 } from './gemini.js';
-import { mergePcmBase64ToWavBuffer } from '../utils/pcmToWav.js';
+import { pcmBase64ToWavBuffer } from '../utils/pcmToWav.js';
 import { splitTextForTTS } from '../utils/ttsChunks.js';
 import { logError, logInfo, logWarn } from '../utils/logger.js';
 
@@ -86,7 +86,7 @@ async function runWithAttemptLogging(operation, context) {
 
 async function generateAudioChunksInParallel({ ttsChunks, ttsModel, ownerType, ownerId, runId, onProgress }) {
   const concurrency = getTtsChunkConcurrency();
-  const audioChunks = new Array(ttsChunks.length);
+  const audioParts = new Array(ttsChunks.length);
   let nextIndex = 0;
 
   logInfo('contentGeneration', 'audio.parallel.start', {
@@ -139,15 +139,22 @@ async function generateAudioChunksInParallel({ ttsChunks, ttsModel, ownerType, o
         }
       );
 
-      audioChunks[currentIndex] = audioBase64;
+      const wavBuffer = pcmBase64ToWavBuffer(audioBase64);
+      audioParts[currentIndex] = {
+        partIndex: chunk.partIndex,
+        partCount: chunk.partCount,
+        text: chunk.text,
+        wavBuffer,
+      };
       logInfo('contentGeneration', 'audio.part.buffered', {
         ownerType,
         ownerId,
         runId,
         partIndex: chunk.partIndex,
         partCount: chunk.partCount,
-        bufferedParts: audioChunks.filter(Boolean).length,
+        bufferedParts: audioParts.filter(Boolean).length,
         model: ttsModel,
+        wavBytes: wavBuffer.length,
         workerIndex,
       });
       if (onProgress) {
@@ -172,7 +179,7 @@ async function generateAudioChunksInParallel({ ttsChunks, ttsModel, ownerType, o
     concurrency: workerCount,
   });
 
-  return audioChunks;
+  return audioParts;
 }
 
 export async function generateRunArtifacts({
@@ -248,7 +255,7 @@ export async function generateRunArtifacts({
     });
   }
 
-  const audioChunks = await generateAudioChunksInParallel({
+  const audioParts = await generateAudioChunksInParallel({
     ttsChunks,
     ttsModel,
     ownerType,
@@ -257,32 +264,26 @@ export async function generateRunArtifacts({
     onProgress,
   });
 
-  if (onProgress) {
-    await onProgress({
-      stage: 'audio.merge.start',
-      message: 'All parts generated. Merging audio.',
-    });
-  }
-
-  const wavBuffer = mergePcmBase64ToWavBuffer(audioChunks);
-  logInfo('contentGeneration', 'audio.merge.success', {
+  const totalWavBytes = audioParts.reduce((sum, part) => sum + (part?.wavBuffer?.length || 0), 0);
+  logInfo('contentGeneration', 'audio.parts.ready', {
     ownerType,
     ownerId,
     runId,
-    wavBytes: wavBuffer.length,
+    partCount: audioParts.length,
+    totalWavBytes,
   });
 
   if (onProgress) {
     await onProgress({
-      stage: 'audio.merge.success',
-      message: 'Audio merge completed.',
+      stage: 'audio.parts.ready',
+      message: `All ${audioParts.length} audio part(s) generated.`,
     });
   }
 
   return {
     text,
     groundingLinks,
-    wavBuffer,
+    audioParts,
     chunkCount: ttsChunks.length,
     toolOptions: normalizedToolOptions,
   };

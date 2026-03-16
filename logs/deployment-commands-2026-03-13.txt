@@ -85,6 +85,49 @@ Current verified production snapshot after follow-up updates:
 - `GEMINI_API_KEYS` secret mapping: gemini-key:latest
 - Health check: `GET /api/health` -> `{"ok":true}`
 
+Additional fix on 2026-03-14 for manual-run audio finalization:
+1. Grant signed-URL permission to the Cloud Run runtime service account
+   - `gcloud iam service-accounts add-iam-policy-binding 323507996614-compute@developer.gserviceaccount.com --project western-creek-489616-m3 --member="serviceAccount:323507996614-compute@developer.gserviceaccount.com" --role="roles/iam.serviceAccountTokenCreator"`
+2. Update backend behavior so signed URL failure does not block GUI audio access
+   - `saveAudio()` now falls back to `/api/artifacts/...`
+   - `manualRunRunner` now writes `audioPath` / `audioDownloadUrl` back to Firestore immediately after audio save
+
+Deployment mistake and fix on 2026-03-14:
+1. A PowerShell deploy used a long raw `--set-env-vars "A=...,B=...,C=..."` command
+   - Cloud Run stored one concatenated value inside `APP_ADMIN_PASSWORD`
+   - Result: browser login failed with `Invalid password`
+2. Immediate fix
+   - `gcloud run services update gemini-multi-prompt-tts-player --project western-creek-489616-m3 --region us-central1 --update-env-vars "APP_ADMIN_PASSWORD=[REDACTED],ADMIN_SESSION_SECRET=[REDACTED],SCHEDULER_SHARED_SECRET=[REDACTED],GCS_BUCKET_NAME=gemini-tts-daily-briefings-western-creek-489616-m3,APP_DEFAULT_TIMEZONE=Europe/Paris,FIRESTORE_COLLECTION_SCHEDULES=schedules,FIRESTORE_COLLECTION_RUNS=schedule_runs,FIRESTORE_COLLECTION_MANUAL_RUNS=manual_runs,FIRESTORE_COLLECTION_RATE_LIMITS=rate_limits,CLOUD_SCHEDULER_LOCATION=us-central1,CLOUD_SCHEDULER_JOB_NAME=schedule-runner,ALLOWED_ORIGINS=https://gemini-multi-prompt-tts-player-323507996614.us-central1.run.app,TTS_CHUNK_CONCURRENCY=2"`
+3. Prevention rule
+   - For production deploys in PowerShell, prefer `--env-vars-file` for the full env set
+   - After every deploy, inspect `gcloud run services describe ... --format=json`
+   - Verify `APP_ADMIN_PASSWORD` is a standalone env value, not a concatenated string
+
+Migration to project `gen-lang-client-0354055629` on 2026-03-14:
+1. Inspect target project resources
+   - `gcloud run services list --project gen-lang-client-0354055629 --region us-central1 --format=json`
+   - `gcloud secrets list --project gen-lang-client-0354055629 --format=json`
+   - `gcloud iam service-accounts list --project gen-lang-client-0354055629 --format=json`
+   - `gcloud storage buckets list --project gen-lang-client-0354055629`
+   - `gcloud scheduler jobs list --project gen-lang-client-0354055629 --location us-central1 --format=json`
+2. Grant required runtime permissions to the default compute service account
+   - `gcloud projects add-iam-policy-binding gen-lang-client-0354055629 --member="serviceAccount:305416593596-compute@developer.gserviceaccount.com" --role="roles/secretmanager.secretAccessor"`
+   - `gcloud iam service-accounts add-iam-policy-binding 305416593596-compute@developer.gserviceaccount.com --project gen-lang-client-0354055629 --member="serviceAccount:305416593596-compute@developer.gserviceaccount.com" --role="roles/iam.serviceAccountTokenCreator"`
+3. Deploy the app fully inside the target project using that project's own secrets and bucket
+   - Cloud Run service: `gemini-multi-prompt-tts-player`
+   - Project: `gen-lang-client-0354055629`
+   - Runtime service account: `305416593596-compute@developer.gserviceaccount.com`
+   - Artifact bucket: `gs://gemini-tts-daily-briefings-0354055629`
+   - Secret names: `APP_ADMIN_PASSWORD`, `ADMIN_SESSION_SECRET`, `SCHEDULER_SHARED_SECRET`, `GEMINI_API_KEY`
+4. Update scheduler to the target project's service URL
+   - `gcloud scheduler jobs update http schedule-runner --project gen-lang-client-0354055629 --location us-central1 --uri "https://gemini-multi-prompt-tts-player-305416593596.us-central1.run.app/api/internal/run-due-schedules" --update-headers "X-Internal-Key=[REDACTED_SECRET],Content-Type=application/json" --message-body "{}"`
+5. Verified result
+   - Canonical URL: `https://gemini-multi-prompt-tts-player-305416593596.us-central1.run.app`
+   - Cloud Run alias: `https://gemini-multi-prompt-tts-player-7kce3noezq-uc.a.run.app`
+   - Ready revision: `gemini-multi-prompt-tts-player-00002-9bt`
+   - Health check: `GET /api/health -> {"ok":true}`
+   - Firestore index `schedules(enabled ASC, nextRunAt ASC)` already existed in the target project
+
 Standard pre-deploy inspection template:
 1. Confirm active account and target project.
    - `gcloud config list --format=json`

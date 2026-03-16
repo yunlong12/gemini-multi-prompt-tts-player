@@ -8,6 +8,16 @@ export interface GeminiToolOptions {
   enableUrlContext?: boolean;
 }
 
+export interface AudioPart {
+  partIndex: number;
+  partCount: number;
+  text: string;
+  audioPath?: string;
+  audioDownloadUrl?: string;
+  durationSeconds?: number;
+  audioBase64?: string;
+}
+
 export type ManualRunStatus = 'queued' | 'generating_text' | 'generating_audio' | 'success' | 'error';
 
 export interface ManualRunProgressEntry {
@@ -34,6 +44,7 @@ export interface ProcessItem {
   audioPath?: string;
   audioDownloadUrl?: string;
   textPath?: string;
+  audioParts?: AudioPart[];
   ttsModel?: string;
   enableGoogleSearch?: boolean;
   enableUrlContext?: boolean;
@@ -61,6 +72,7 @@ export interface PlayerItem {
   source: PlayerItemSource;
   title: string;
   timestamp: number;
+  audioParts?: AudioPart[];
   partIndex?: number;
   partCount?: number;
   partGroupId?: string;
@@ -74,6 +86,30 @@ export interface PlayerItem {
   localAudioBase64?: string;
   error?: string;
   ttsModel?: string;
+}
+
+export interface PlayerQueueSegment {
+  key: string;
+  playerItemId: string;
+  partIndex?: number;
+  partCount?: number;
+  audioPath?: string;
+  legacy: boolean;
+}
+
+export interface PlayerUiState {
+  checkedPlayerItemIds: Record<string, boolean>;
+  selectedPlayerItemId: string | null;
+  expandedAudioPartKeys: Record<string, boolean>;
+  currentlyPlayingPlayerItemId: string | null;
+  currentlyPlayingPartIndex: number | null;
+  playerProgress: number;
+  playerDuration: number;
+  isPlayerPlaying: boolean;
+  isPlayingSequence: boolean;
+  queue: PlayerQueueSegment[];
+  queueIndex: number;
+  pauseOffset: number;
 }
 
 export type ScheduleFrequency = 'daily' | 'weekly' | 'custom_interval';
@@ -111,6 +147,7 @@ export interface ScheduleRun {
   generatedText?: string;
   groundingLinks: GroundingUrl[];
   audioPath?: string;
+  audioParts?: AudioPart[];
   textPath?: string;
   audioDownloadUrl?: string;
   errorMessage?: string;
@@ -132,6 +169,7 @@ export interface ManualRun {
   ttsModel: string;
   toolOptions?: GeminiToolOptions;
   audioPath?: string;
+  audioParts?: AudioPart[];
   audioDownloadUrl?: string;
   textPath?: string;
   errorMessage?: string;

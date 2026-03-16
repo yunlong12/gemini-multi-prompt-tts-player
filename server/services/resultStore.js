@@ -93,12 +93,31 @@ export async function saveAudio({ scheduleId, runId, startedAt, outputPrefix, wa
       contentType: 'audio/wav',
       resumable: false,
     });
-    const [signedUrl] = await file.getSignedUrl({
-      action: 'read',
-      expires: Date.now() + 60 * 60 * 1000,
+    let audioDownloadUrl = `/api/artifacts/${encodeURIComponent(objectPath)}`;
+    let signedUrlMode = 'proxy_fallback';
+    try {
+      const [signedUrl] = await file.getSignedUrl({
+        action: 'read',
+        expires: Date.now() + 60 * 60 * 1000,
+      });
+      audioDownloadUrl = signedUrl;
+      signedUrlMode = 'signed_url';
+    } catch (error) {
+      logWarn('resultStore', 'saveAudio.gcs_signed_url_failed', {
+        scheduleId,
+        runId,
+        objectPath,
+        error,
+      });
+    }
+    logInfo('resultStore', 'saveAudio.gcs', {
+      scheduleId,
+      runId,
+      objectPath,
+      bytes: wavBuffer.length,
+      signedUrlMode,
     });
-    logInfo('resultStore', 'saveAudio.gcs', { scheduleId, runId, objectPath, bytes: wavBuffer.length });
-    return { audioPath: objectPath, audioDownloadUrl: signedUrl };
+    return { audioPath: objectPath, audioDownloadUrl };
   }
 
   const filePath = await ensureLocalResultDir(objectPath);
